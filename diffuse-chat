@@ -1,0 +1,737 @@
+#!/usr/bin/env python3
+"""diffuse-chat — a chat façade in front of a Diffuse Enterprise deployment.
+
+    ./diffuse-chat up                 the developer profile: one credential
+    ./diffuse-chat up --enterprise    the gateway profile: acts for each person
+    ./diffuse-chat doctor             is this actually working, and if not, why
+    ./diffuse-chat down               stop it; --volumes to forget it entirely
+
+Four verbs, and `up` is the only one that changes anything. In particular it
+provisions the default agent, because v0.8.7 cannot start a conversation
+without one and a shipped profile that told each user to build their own would
+not be a product.
+
+Python rather than shell for one reason that recurs below: every call this makes
+to LibreChat's own API has to present a **browser user agent**, and has to read
+JSON back to say something useful about what went wrong. Both are miserable in
+shell and both are load-bearing.
+
+Nothing here patches LibreChat. It is upstream, pinned by digest, and everything
+this script does to it is done through its own HTTP API or its own compose
+environment.
+"""
+
+import argparse
+import json
+import os
+import pathlib
+import secrets
+import shutil
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+HERE = pathlib.Path(__file__).resolve().parent
+ENV_FILE = HERE / ".env"
+
+# ---------------------------------------------------------------------------
+# The user agent, and why this constant exists
+# ---------------------------------------------------------------------------
+#
+# `api/server/middleware/uaParser.js` in v0.8.7 answers
+# `{"message":"Illegal request"}` to any request whose user agent is not a
+# browser. It applies to the whole API, it is not documented upstream, and it
+# looks nothing like a permission problem — it cost the header smoke test more
+# than every other obstacle combined, because agent creation and every chat
+# attempt failed identically for a reason that was neither.
+#
+# So every call below presents this. It is not a workaround dressed up as a
+# constant: a `doctor` that reported "Illegal request" would teach an operator
+# something false about their own deployment.
+BROWSER_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/140.0.0.0 Safari/537.36"
+)
+
+# Runs inside LibreChat's own node, with its own NODE_EXTRA_CA_CERTS: the point
+# is to exercise the trust store the façade will actually use, not this
+# machine's. Prints one line — `OK <models>`, `TLS <why>`, or the HTTP answer —
+# so the caller has nothing to parse.
+TLS_PROBE = """
+const [url, token] = process.argv.slice(1);
+fetch(url, { headers: { Authorization: `Bearer ${token}` } })
+  .then(async (r) => {
+    const body = await r.text();
+    if (!r.ok) { console.log(`${r.status} ${body.slice(0, 160)}`); process.exit(0); }
+    const names = (JSON.parse(body).data || []).map((m) => m.id);
+    console.log(`OK ${names.slice(0, 5).join(", ")}`);
+  })
+  .catch((e) => {
+    const code = e?.cause?.code || e?.code || "";
+    const why = `${code} ${e?.cause?.message || e.message}`.trim();
+    console.log(/CERT|SELF_SIGNED|ALT_NAME|UNABLE_TO_VERIFY/.test(why)
+      ? `TLS ${why}` : why);
+  });
+"""
+
+DEV_FILES = ["-f", "compose.yaml"]
+ENTERPRISE_FILES = ["-f", "compose.yaml", "-f", "compose.enterprise.yaml"]
+
+AGENT_ID = "agent_diffuse_default"
+AGENT_NAME = "Diffuse"
+
+
+# ---------------------------------------------------------------------------
+# Saying things
+# ---------------------------------------------------------------------------
+
+def say(message):
+    print(f"  {message}")
+
+
+def ok(label, detail=""):
+    print(f"  \033[32mok\033[0m    {label:<44} {detail}")
+
+
+def bad(label, detail=""):
+    print(f"  \033[31mFAIL\033[0m  {label:<44} {detail}")
+
+
+def die(message, *hints):
+    print(f"\n  {message}", file=sys.stderr)
+    for hint in hints:
+        print(f"  {hint}", file=sys.stderr)
+    sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# .env
+# ---------------------------------------------------------------------------
+
+def read_env():
+    """The `.env` file as a dict. Absent is empty, not an error."""
+    values = {}
+    if not ENV_FILE.is_file():
+        return values
+    for line in ENV_FILE.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+
+def write_env(values):
+    """Rewrites `.env`, preserving order for the keys that were already there."""
+    lines = ["# Written by ./diffuse-chat. Never commit this file.\n"]
+    for key, value in values.items():
+        lines.append(f"{key}={value}\n")
+    ENV_FILE.write_text("".join(lines))
+    ENV_FILE.chmod(0o600)
+
+
+def ensure_secrets(values):
+    """Generates LibreChat's four secrets on first run.
+
+    Generated here rather than shipped in the compose file, because a stack
+    whose JWT secret came from a published repository is a stack anybody can
+    mint a session for. `CREDS_IV` is 16 hex bytes and `CREDS_KEY` 32, which is
+    what LibreChat's own encryption expects.
+    """
+    made = []
+    for key, length in (
+        ("JWT_SECRET", 32),
+        ("JWT_REFRESH_SECRET", 32),
+        ("CREDS_KEY", 32),
+        ("CREDS_IV", 16),
+    ):
+        if not values.get(key):
+            values[key] = secrets.token_hex(length)
+            made.append(key)
+    return made
+
+
+REQUIRED = {
+    "DIFFUSE_BASE_URL": "where the deployment serves /v1, e.g. "
+                        "https://coordinator.internal:8443/v1",
+    "DIFFUSE_CA_CERT": "an absolute path to the deployment's ca.crt on this machine",
+    "DIFFUSE_TOKEN": "an API key: diffuse-coordinator apikey create --name chat",
+}
+REQUIRED_ENTERPRISE = {
+    "DIFFUSE_GATEWAY_TOKEN": "a gateway credential: "
+                             "diffuse-coordinator apikey create --name chat --act-as",
+}
+
+
+def check_required(values, enterprise):
+    wanted = dict(REQUIRED)
+    if enterprise:
+        wanted.update(REQUIRED_ENTERPRISE)
+    missing = [key for key in wanted if not values.get(key)]
+    if missing:
+        print("\n  These are not set in .env:\n", file=sys.stderr)
+        for key in missing:
+            print(f"    {key:<24} {wanted[key]}", file=sys.stderr)
+        print("\n  `cp .env.example .env` and fill them in.\n", file=sys.stderr)
+        sys.exit(1)
+
+    ca = pathlib.Path(values["DIFFUSE_CA_CERT"])
+    if not ca.is_file():
+        die(
+            f"DIFFUSE_CA_CERT points at {ca}, which is not a file.",
+            "It is the deployment's own CA — /etc/diffuse/ca.crt on the",
+            "coordinator — and LibreChat needs it to trust the endpoint.",
+        )
+
+
+# ---------------------------------------------------------------------------
+# compose
+# ---------------------------------------------------------------------------
+
+def compose(files, *args, capture=False, check=True):
+    command = ["docker", "compose", *files, *args]
+    if capture:
+        run = subprocess.run(command, cwd=HERE, capture_output=True, text=True)
+        if check and run.returncode != 0:
+            die(f"`{' '.join(command)}` failed:", run.stderr.strip())
+        return run.stdout
+    run = subprocess.run(command, cwd=HERE)
+    if check and run.returncode != 0:
+        sys.exit(run.returncode)
+    return ""
+
+
+def mongo_eval(script):
+    """Runs one mongosh expression against the stack's database."""
+    run = subprocess.run(
+        ["docker", "compose", "-f", "compose.yaml", "exec", "-T", "mongo",
+         "mongosh", "--quiet", "LibreChat", "--eval", script],
+        cwd=HERE, capture_output=True, text=True,
+    )
+    return run.stdout.strip() if run.returncode == 0 else ""
+
+
+# ---------------------------------------------------------------------------
+# LibreChat's own API, presented as a browser
+# ---------------------------------------------------------------------------
+
+def librechat(path, payload=None, token=None, method=None, port=3080, timeout=60):
+    data = json.dumps(payload).encode() if payload is not None else None
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}", data=data, method=method
+    )
+    # See BROWSER_UA above. Not optional, on any call.
+    request.add_header("User-Agent", BROWSER_UA)
+    request.add_header("Accept", "application/json")
+    if data:
+        request.add_header("Content-Type", "application/json")
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status, response.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as error:
+        return error.code, error.read().decode("utf-8", "replace")
+    except Exception as error:  # noqa: BLE001 — a dead port is a normal answer here
+        return 0, repr(error)
+
+
+def wait_for_librechat(port, seconds=180):
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        status, _ = librechat("/api/config", port=port, timeout=5)
+        if status == 200:
+            return True
+        time.sleep(2)
+    return False
+
+
+# ---------------------------------------------------------------------------
+# The agent, which v0.8.7 will not chat without
+# ---------------------------------------------------------------------------
+
+def endpoint_models(port, token):
+    """What the deployment tells *this* façade it serves, through its own API."""
+    status, body = librechat("/api/models", token=token, port=port)
+    if status != 200:
+        return []
+    try:
+        return json.loads(body).get("Diffuse") or []
+    except (json.JSONDecodeError, AttributeError):
+        return []
+
+
+def provision_agent(port, admin_token, model):
+    """Creates the default `Diffuse` agent and shares it with everybody.
+
+    **Why this exists at all.** v0.8.7 has no `/api/ask` route: every
+    conversation goes through `/api/agents/chat` and requires an `agent_id`. Out
+    of the box the composer says "Please select an Agent" and nothing can be
+    sent. Re-enabling `endpointsMenu` and `modelSelect` does *not* restore a
+    direct chat — that was tried during the header smoke test and the composer
+    still demanded an agent. So a shipped profile either provisions one or does
+    not work, and "every user creates their own agent by hand" is not a product.
+
+    **Why through the API rather than by writing to Mongo.** Seeding the
+    `agents` collection is what the smoke test did and it half-worked: the
+    document appears, and then a plain user is refused *their own* agent with
+    "Insufficient permissions to access this agent", because v0.8.7 gates agents
+    on ACL rows in a separate collection that a hand-written document does not
+    create. Going through `POST /api/agents` makes LibreChat write its own ACL
+    rows, and `PUT /api/permissions/agent/<id>` shares it publicly by the same
+    route the UI uses. Neither is a schema this repository then has to track.
+    """
+    # `model` is required by v0.8.7's agent schema even though the person will
+    # pick from the endpoint's catalogue afterwards. Asked of the deployment
+    # rather than assumed, so the agent points at something that is actually
+    # served.
+    status, body = librechat("/api/agents", {
+        "name": AGENT_NAME,
+        "description": "The models this deployment serves.",
+        "instructions": "",
+        "provider": "Diffuse",
+        "model": model,
+        "tools": [],
+        "model_parameters": {},
+    }, token=admin_token, port=port)
+
+    if status not in (200, 201):
+        return None, f"POST /api/agents -> {status} {body[:200]}"
+
+    agent = json.loads(body)
+    agent_id = agent.get("id")
+    # **The permissions API is keyed on the Mongo `_id`, not on the `id` string
+    # everything else in the agent API uses.** Passing the wrong one answers
+    # `400 Invalid resource ID`, which reads like a bug in the id you sent
+    # rather than like two identifiers for one object.
+    resource_id = agent.get("_id") or agent_id
+
+    # Shared with everybody who can sign in, as a viewer. Without this the
+    # agent belongs to whoever `up` ran as, and every other person is refused
+    # it with "Insufficient permissions to access this agent" — including for
+    # an agent seeded directly into Mongo, which is why this goes through the
+    # API at all.
+    status, body = librechat(
+        f"/api/permissions/agent/{resource_id}",
+        {"updated": [], "removed": [], "public": True,
+         "publicAccessRoleId": "agent_viewer"},
+        token=admin_token, method="PUT", port=port,
+    )
+    if status != 200:
+        return agent_id, f"shared? PUT /api/permissions -> {status} {body[:200]}"
+
+    return agent_id, None
+
+
+def existing_agent(port, token):
+    status, body = librechat("/api/agents", token=token, port=port)
+    if status != 200:
+        return None
+    try:
+        listed = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    items = listed.get("data") if isinstance(listed, dict) else listed
+    for item in items or []:
+        if item.get("name") == AGENT_NAME:
+            return item.get("id")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# up
+# ---------------------------------------------------------------------------
+
+def provisioning_account(values):
+    """The account `up` uses to own the shared agent.
+
+    A service account, created by this script on the first run and never used by
+    a person. It exists because the agent below has to be created by *somebody*
+    — v0.8.7 gates agents on ACL rows tied to an owner — and the alternative is
+    telling every customer's first user to click through an agent wizard before
+    the product works.
+
+    Its credentials live in `.env` beside the secrets, mode 0600.
+    """
+    if not values.get("DIFFUSE_CHAT_SERVICE_EMAIL"):
+        values["DIFFUSE_CHAT_SERVICE_EMAIL"] = "diffuse-chat@localhost.invalid"
+        values["DIFFUSE_CHAT_SERVICE_PASSWORD"] = secrets.token_urlsafe(24)
+    return values["DIFFUSE_CHAT_SERVICE_EMAIL"], values["DIFFUSE_CHAT_SERVICE_PASSWORD"]
+
+
+def sign_in(port, email, password):
+    status, body = librechat("/api/auth/login", {"email": email, "password": password},
+                             port=port)
+    if status != 200:
+        return None
+    return json.loads(body).get("token")
+
+
+def ensure_service_account(port, email, password):
+    """Signs the service account in, registering it if it does not exist yet."""
+    token = sign_in(port, email, password)
+    if token:
+        return token, None
+
+    status, body = librechat("/api/auth/register", {
+        "name": "Diffuse", "username": "diffuse-chat",
+        "email": email, "password": password, "confirm_password": password,
+    }, port=port)
+    if status not in (200, 201):
+        return None, f"registering the service account -> {status} {body[:160]}"
+    token = sign_in(port, email, password)
+    return token, None if token else "registered, and then could not sign in"
+
+
+def human_accounts(service_email):
+    """People, not the service account this script created."""
+    out = mongo_eval(
+        f'db.users.countDocuments({{email: {{$ne: "{service_email}"}}}})')
+    try:
+        return int(out.splitlines()[-1])
+    except (ValueError, IndexError):
+        return -1
+
+
+def command_up(args):
+    values = read_env()
+    made = ensure_secrets(values)
+    service_email, service_password = provisioning_account(values)
+    check_required(values, args.enterprise)
+
+    # **Registration closes itself.** Open while there is nobody, shut once
+    # there is somebody — decided by asking the database rather than by a flag
+    # an operator has to remember, and counting people rather than the service
+    # account this script owns. In the enterprise profile the overlay closes it
+    # outright: the people who may use the deployment are the ones an operator
+    # imported, and a self-registered account would reach the façade and be
+    # refused by the endpoint.
+    #
+    # It has to be decided *before* the container starts, because LibreChat
+    # reads it once at boot.
+    people = human_accounts(service_email)
+    values["ALLOW_REGISTRATION"] = "false" if people > 0 else "true"
+    write_env(values)
+
+    if made:
+        say(f"generated {', '.join(made)} into .env — not committed, mode 0600")
+
+    files = ENTERPRISE_FILES if args.enterprise else DEV_FILES
+    profile = "enterprise" if args.enterprise else "developer"
+    say(f"starting the {profile} profile")
+    compose(files, "up", "-d")
+
+    port = int(values.get("DIFFUSE_CHAT_PORT", "3080"))
+    say("waiting for LibreChat")
+    if not wait_for_librechat(port):
+        die("LibreChat did not answer /api/config within three minutes.",
+            "`./diffuse-chat doctor` says more; its own log is",
+            "`docker compose logs librechat`.")
+
+    # --- the agent v0.8.7 will not chat without ---------------------------
+    token, problem = ensure_service_account(port, service_email, service_password)
+    if token is None and people > 0:
+        # Registration is shut and the service account predates nothing: open
+        # the door for exactly as long as it takes, then shut it again. Only
+        # reachable on a stack that had accounts before this script existed.
+        say("reopening registration briefly to create the service account")
+        values["ALLOW_REGISTRATION"] = "true"
+        write_env(values)
+        compose(files, "up", "-d")
+        wait_for_librechat(port)
+        token, problem = ensure_service_account(port, service_email, service_password)
+        values["ALLOW_REGISTRATION"] = "false"
+        write_env(values)
+        compose(files, "up", "-d")
+        wait_for_librechat(port)
+
+    if token is None:
+        die(f"could not provision the default agent: {problem}",
+            "Without it v0.8.7 cannot start a conversation at all — see the",
+            "README's \"v0.8.7\" section.")
+
+    found = existing_agent(port, token)
+    if found:
+        say(f"the {AGENT_NAME!r} agent is already there ({found})")
+    else:
+        served = endpoint_models(port, token)
+        model = served[0] if served else values.get("DIFFUSE_MODEL", "diffuse")
+        if not served:
+            say(f"the deployment did not answer with a catalogue; the agent will")
+            say(f"name {model!r} from .env. `doctor` says why it could not.")
+        agent_id, problem = provision_agent(port, token, model)
+        if agent_id is None:
+            die(f"could not create the default agent: {problem}")
+        if problem:
+            say(f"created {agent_id}, but sharing it did not take: {problem}")
+        else:
+            say(f"created the {AGENT_NAME!r} agent and shared it with everyone")
+
+    print()
+    if people <= 0:
+        say(f"open http://127.0.0.1:{port} and create the first account.")
+        say("registration closes by itself: the next `up` sees a person and")
+        say("shuts the door behind you.")
+        if args.enterprise:
+            print()
+            say("in this profile that person must exist in the deployment too:")
+            say("  diffuse-coordinator identity import users.csv")
+    else:
+        say(f"open http://127.0.0.1:{port} — registration is closed"
+            f" ({people} account{'s' if people != 1 else ''}).")
+
+    print()
+    say("then: ./diffuse-chat doctor")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# doctor
+# ---------------------------------------------------------------------------
+
+def compose_digests(files):
+    """The image digests compose will actually run, from its own resolution."""
+    out = compose(files, "config", "--format", "json", capture=True)
+    try:
+        parsed = json.loads(out)
+    except json.JSONDecodeError:
+        return {}
+    return {
+        name: service.get("image", "")
+        for name, service in (parsed.get("services") or {}).items()
+    }
+
+
+def running_digests(files):
+    """What is running, by the image each container was actually created from."""
+    ids = compose(files, "ps", "-q", capture=True, check=False).split()
+    found = {}
+    for container in ids:
+        run = subprocess.run(
+            ["docker", "inspect", "--format",
+             "{{index .Config.Labels \"com.docker.compose.service\"}} {{.Config.Image}}",
+             container],
+            capture_output=True, text=True,
+        )
+        if run.returncode == 0 and run.stdout.strip():
+            service, _, image = run.stdout.strip().partition(" ")
+            found[service] = image
+    return found
+
+
+def command_doctor(args):
+    values = read_env()
+    if not values:
+        die("no .env here. `./diffuse-chat up` first.")
+
+    enterprise = args.enterprise or bool(values.get("DIFFUSE_GATEWAY_TOKEN")) and \
+        _running_config_is_enterprise()
+    files = ENTERPRISE_FILES if enterprise else DEV_FILES
+    port = int(values.get("DIFFUSE_CHAT_PORT", "3080"))
+    failures = 0
+
+    print(f"\n  {'enterprise' if enterprise else 'developer'} profile\n")
+
+    # --- 1. the images are the ones this repository pins -------------------
+    #
+    # A digest that drifted is the failure this whole arrangement is least able
+    # to notice by itself: everything would keep working and the thing it was
+    # measured against would no longer be the thing running.
+    declared = compose_digests(files)
+    running = running_digests(files)
+    for service, image in declared.items():
+        live = running.get(service)
+        if live is None:
+            bad(f"{service}: pinned image is running", "not running")
+            failures += 1
+        elif live != image:
+            bad(f"{service}: pinned image is running", f"running {live[:60]}")
+            failures += 1
+        else:
+            ok(f"{service}: pinned image is running", image.split("@")[-1][:23] + "…")
+
+    # --- 2. LibreChat answers ---------------------------------------------
+    status, _ = librechat("/api/config", port=port, timeout=10)
+    if status == 200:
+        ok("LibreChat answers", f"http://127.0.0.1:{port}")
+    else:
+        bad("LibreChat answers", f"/api/config -> {status}")
+        failures += 1
+
+    # --- 3. the CA is mounted where node will look for it ------------------
+    ca_path = values.get("DIFFUSE_CA_CERT", "")
+    inside = subprocess.run(
+        ["docker", "compose", *files, "exec", "-T", "librechat",
+         "sh", "-c", "test -s /app/diffuse-ca.crt && echo present"],
+        cwd=HERE, capture_output=True, text=True,
+    )
+    if "present" in inside.stdout:
+        ok("the deployment's CA is mounted", "/app/diffuse-ca.crt")
+    else:
+        bad("the deployment's CA is mounted",
+            f"{ca_path} is not reaching the container")
+        failures += 1
+
+    env_ca = subprocess.run(
+        ["docker", "compose", *files, "exec", "-T", "librechat",
+         "sh", "-c", "echo $NODE_EXTRA_CA_CERTS"],
+        cwd=HERE, capture_output=True, text=True,
+    ).stdout.strip()
+    if env_ca == "/app/diffuse-ca.crt":
+        ok("NODE_EXTRA_CA_CERTS points at it", env_ca)
+    else:
+        bad("NODE_EXTRA_CA_CERTS points at it", repr(env_ca))
+        failures += 1
+
+    # --- 4. the TLS chain and the catalogue, from inside the container -----
+    #
+    # **Run in LibreChat's own node**, not on this machine, and that is the
+    # whole value of the check. The host may resolve the endpoint's name and
+    # trust its CA while the container does neither — a `baseURL` naming
+    # something only the host's `/etc/hosts` knows, or a CA file mounted at a
+    # path node was never told about. Checking from here would pass on exactly
+    # the arrangement that fails.
+    base = values.get("DIFFUSE_BASE_URL", "")
+    token = values.get("DIFFUSE_GATEWAY_TOKEN" if enterprise else "DIFFUSE_TOKEN", "")
+    probe = subprocess.run(
+        ["docker", "compose", *files, "exec", "-T", "librechat",
+         "node", "-e", TLS_PROBE, base.rstrip("/") + "/models", token],
+        cwd=HERE, capture_output=True, text=True,
+    )
+    verdict = (probe.stdout or probe.stderr).strip().splitlines()
+    verdict = verdict[-1] if verdict else "no answer from the probe"
+
+    if verdict.startswith("TLS "):
+        bad("TLS chain validates with the mounted CA", verdict[4:][:90])
+        failures += 1
+    elif not enterprise:
+        if verdict.startswith("OK "):
+            ok("TLS chain validates with the mounted CA", base)
+            names = verdict[3:].strip()
+            # An empty catalogue is not a failure: a deployment can legitimately
+            # serve nothing yet, and a scope can legitimately hide everything.
+            # Said, not scored.
+            ok("GET /v1/models with the token",
+               names if names else "answered, and the list is empty")
+        else:
+            bad("GET /v1/models with the token", verdict[:110])
+            failures += 1
+    else:
+        # **In this profile a 403 is the healthy answer**, and that is worth
+        # spelling out rather than leaving an operator to be alarmed by it.
+        #
+        # `doctor` is not a person. A gateway credential presenting no identity
+        # must be refused — that is the whole of design 021 D-3 — so the
+        # refusal proves three things at once: the endpoint is reachable, the
+        # TLS chain validates, and the credential really is a gateway. A 200
+        # here would mean the deployment served an unidentified request from a
+        # credential that may act for anybody, which is the failure this
+        # profile exists to make impossible.
+        if verdict.startswith("OK "):
+            bad("the endpoint refuses an unidentified gateway",
+                "it answered 200, which it must never do")
+            failures += 1
+        elif verdict.startswith("403") and "did not say which user" in verdict:
+            ok("TLS chain validates with the mounted CA", base)
+            ok("the endpoint refuses an unidentified gateway",
+               "403, which is the correct answer to `doctor`")
+        elif verdict.startswith("403") and "may not act for a user" in verdict:
+            bad("DIFFUSE_GATEWAY_TOKEN is a gateway credential",
+                "it is an ordinary key — reissue it with --act-as")
+            failures += 1
+        else:
+            bad("the endpoint answers this credential", verdict[:110])
+            failures += 1
+
+    # --- 5. the agent v0.8.7 will not chat without -------------------------
+    listed = mongo_eval(f'db.agents.countDocuments({{name: "{AGENT_NAME}"}})')
+    try:
+        agents = int(listed.splitlines()[-1])
+    except (ValueError, IndexError):
+        agents = -1
+    if agents > 0:
+        ok("the default agent exists", f"{agents} named {AGENT_NAME!r}")
+    else:
+        bad("the default agent exists",
+            "v0.8.7 cannot start a conversation without one")
+        failures += 1
+
+    acl = mongo_eval("db.aclentries.countDocuments({})")
+    try:
+        entries = int(acl.splitlines()[-1])
+    except (ValueError, IndexError):
+        entries = -1
+    if entries > 0:
+        ok("it is shared, not just present", f"{entries} ACL entries")
+    else:
+        bad("it is shared, not just present",
+            "a plain user is refused an agent with no ACL row")
+        failures += 1
+
+    print()
+    if failures:
+        print(f"  \033[31m{failures} check(s) failed.\033[0m "
+              f"The README's \"v0.8.7\" section covers the usual causes.\n")
+        return 1
+    print("  \033[32mEverything this can check from here is working.\033[0m\n")
+    return 0
+
+
+def _running_config_is_enterprise():
+    """Whether the container currently running was given the enterprise config."""
+    run = subprocess.run(
+        ["docker", "compose", "-f", "compose.yaml", "exec", "-T", "librechat",
+         "sh", "-c", "grep -c X-Diffuse-User-Id /app/librechat.yaml || true"],
+        cwd=HERE, capture_output=True, text=True,
+    )
+    return run.stdout.strip() not in ("", "0")
+
+
+# ---------------------------------------------------------------------------
+# down
+# ---------------------------------------------------------------------------
+
+def command_down(args):
+    files = ENTERPRISE_FILES if (HERE / "compose.enterprise.yaml").is_file() else DEV_FILES
+    extra = ["--volumes"] if args.volumes else []
+    if args.volumes:
+        say("removing the volumes: conversations, uploads and accounts go with them")
+    compose(files, "down", *extra, check=False)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="diffuse-chat", description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    up = sub.add_parser("up", help="start the stack")
+    up.add_argument("--enterprise", action="store_true",
+                    help="the gateway profile: the façade acts for each person")
+    up.set_defaults(run=command_up)
+
+    doctor = sub.add_parser("doctor", help="check what is actually working")
+    doctor.add_argument("--enterprise", action="store_true")
+    doctor.set_defaults(run=command_doctor)
+
+    down = sub.add_parser("down", help="stop the stack")
+    down.add_argument("--volumes", action="store_true",
+                      help="and forget everything it stored")
+    down.set_defaults(run=command_down)
+
+    if shutil.which("docker") is None:
+        die("docker is not on the PATH.")
+
+    args = parser.parse_args()
+    sys.exit(args.run(args))
+
+
+if __name__ == "__main__":
+    main()

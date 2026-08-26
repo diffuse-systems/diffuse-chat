@@ -1,0 +1,85 @@
+# The chat façade, developer profile.
+#
+# One credential for the whole stack, held here, and **no identity assertion**:
+# every request reaches the deployment as the same API key, and the audit trail
+# says so honestly. That is the right shape for one developer on one laptop and
+# the wrong shape for an organisation — `compose.enterprise.yaml` is the overlay
+# that fixes it, and the README says when to reach for it.
+#
+# Everything is pinned by digest. A tag is a moving target, and this whole
+# arrangement rests on what one specific LibreChat build substitutes into an
+# endpoint's `headers` block — see `evidence/smoke-verdict.md`, which measured
+# it against exactly this digest.
+
+services:
+  mongo:
+    image: mongo@sha256:b6421fd6d1c5ded6377b397d8983e2f82e2100dc5123332dcfda2065a472be5b
+    restart: unless-stopped
+    volumes:
+      - mongo:/data/db
+    # Not published. LibreChat reaches it on the compose network and nothing
+    # else has any business talking to it.
+
+  librechat:
+    # v0.8.7. The digest, not the tag: design 021 §7.2 records that reading the
+    # development tag instead would have produced a design that was correct
+    # about a version nobody runs.
+    image: ghcr.io/danny-avila/librechat@sha256:c5db3331b845e1f289f8d04c0c77936c4bbe372f76730a804abc1c37e44d23a9
+    restart: unless-stopped
+    depends_on: [mongo]
+    ports:
+      # Loopback only. A chat façade with a customer's conversations in it does
+      # not get bound to every interface because a compose file was terse.
+      - "127.0.0.1:${DIFFUSE_CHAT_PORT:-3080}:3080"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3080
+      MONGO_URI: mongodb://mongo:27017/LibreChat
+      CONFIG_PATH: /app/librechat.yaml
+
+      # Generated into `.env` by `diffuse-chat up` on first run, never
+      # committed. A stack whose JWT secret came from a published compose file
+      # is a stack anybody can mint a session for.
+      JWT_SECRET: ${JWT_SECRET:?run ./diffuse-chat up, which generates the secrets}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?}
+      CREDS_KEY: ${CREDS_KEY:?}
+      CREDS_IV: ${CREDS_IV:?}
+
+      # **The deployment's own CA.** LibreChat is a client: it holds no
+      # certificate and terminates no trust, it only has to trust the one the
+      # api presents. Without this, node rejects the endpoint and the error a
+      # user sees says nothing about certificates.
+      NODE_EXTRA_CA_CERTS: /app/diffuse-ca.crt
+
+      # Open until there is one account, closed afterwards — `diffuse-chat up`
+      # decides which by asking the database, so the second `up` closes the door
+      # the first one left open. See the README.
+      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-true}
+      ALLOW_EMAIL_LOGIN: "true"
+      ALLOW_SOCIAL_LOGIN: "false"
+
+      # Nothing about this deployment leaves it. The product's GDPR position is
+      # not a paragraph in a brochure, it is this line.
+      NO_ANALYTICS: "true"
+
+      APP_TITLE: ${APP_TITLE:-Diffuse}
+      CUSTOM_FOOTER: ${CUSTOM_FOOTER:-Diffuse Enterprise · your machines, your data}
+
+      DIFFUSE_BASE_URL: ${DIFFUSE_BASE_URL:?set it in .env}
+      DIFFUSE_TOKEN: ${DIFFUSE_TOKEN:?set it in .env}
+      DIFFUSE_MODEL: ${DIFFUSE_MODEL:-diffuse}
+    volumes:
+      - ./config/librechat.yaml:/app/librechat.yaml:ro
+      - ${DIFFUSE_CA_CERT:?set it in .env}:/app/diffuse-ca.crt:ro
+      # Branding by volume, so a customer's logo never means a rebuilt image.
+      # An empty directory changes nothing, which is the default.
+      - ./branding/assets:/app/client/public/assets:ro
+      - images:/app/client/public/images
+      - uploads:/app/uploads
+      - logs:/app/api/logs
+
+volumes:
+  mongo:
+  images:
+  uploads:
+  logs:

@@ -1,0 +1,35 @@
+# The enterprise overlay: the façade acts for the person who signed in.
+#
+#     docker compose -f compose.yaml -f compose.enterprise.yaml up -d
+#
+# or, which is the same thing and is what the README tells a customer:
+#
+#     ./diffuse-chat up --enterprise
+#
+# **What changes is one credential and two headers.** The gateway credential —
+# issued with `diffuse-coordinator apikey create --act-as` — is the only kind
+# that may say who a request is for, and it says so with
+# `{{LIBRECHAT_USER_ID}}` and `{{LIBRECHAT_USER_EMAIL}}`. The deployment then
+# writes the *person* on its audit trail, with the credential beside them.
+#
+# The overlay is deliberately thin. Everything about how the stack is built,
+# pinned and bound lives in `compose.yaml`; a customer comparing the two files
+# should be able to see the whole of the difference on one screen.
+
+services:
+  librechat:
+    environment:
+      # **Registration is closed.** In this profile the people who may use the
+      # deployment are the people an operator imported with
+      # `diffuse-coordinator identity import`, and a self-registered account
+      # would reach the façade and be refused by the endpoint — which is safe,
+      # and is a support call nobody needs.
+      ALLOW_REGISTRATION: "false"
+
+      # The gateway credential. Separate from `DIFFUSE_TOKEN` on purpose: the
+      # two are not interchangeable, they have different blast radii, and a
+      # `.env` that used one name for both would make swapping profiles a way to
+      # hand a whole organisation's traffic to a developer's key.
+      DIFFUSE_GATEWAY_TOKEN: ${DIFFUSE_GATEWAY_TOKEN:?issue one with `apikey create --act-as`}
+    volumes:
+      - ./config/librechat.enterprise.yaml:/app/librechat.yaml:ro

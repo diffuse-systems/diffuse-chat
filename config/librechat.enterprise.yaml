@@ -1,0 +1,67 @@
+# The enterprise profile's endpoint: the façade acts for the person signed in.
+#
+# The difference from `librechat.yaml` is the credential and the two headers
+# below. Everything else is deliberately identical, so a customer diffing the
+# two files sees the whole of what changes.
+
+version: 1.2.8
+cache: false
+
+interface:
+  # As in the developer profile: re-enabled so a person can see the endpoint and
+  # pick a model, and **not** what makes the chat work. v0.8.7 requires an
+  # agent; `diffuse-chat up --enterprise` provisions one and shares it.
+  endpointsMenu: true
+  modelSelect: true
+  parameters: true
+  presets: true
+
+endpoints:
+  custom:
+    - name: "Diffuse"
+      # The **gateway** credential, `apikey create --act-as`. An ordinary key
+      # here is refused on every request with a message naming this file.
+      apiKey: "${DIFFUSE_GATEWAY_TOKEN}"
+      baseURL: "${DIFFUSE_BASE_URL}"
+      models:
+        # Two v0.8.7 facts in four lines.
+        #
+        # **The `default` list may not be empty**, even with `fetch: true` —
+        # the config schema requires at least one element. And **`${...}` is
+        # not substituted here**: it is substituted in `apiKey` and `baseURL`
+        # and arrives literally inside `models`, so a variable would show up in
+        # the picker as its own name. Measured, both of them.
+        #
+        # So this is a literal placeholder and nothing else. The real list is
+        # fetched from the deployment, which filters it by what the credential
+        # may call; this string is only ever shown when the endpoint cannot be
+        # reached, and then `./diffuse-chat doctor` says why.
+        default: ["unavailable"]
+        fetch: true
+        # In this profile the fetched answer is **per person**: the deployment
+        # filters the catalogue by the asserted identity's scope, so two people
+        # signed in here can be shown two different lists.
+      modelDisplayLabel: "Diffuse"
+
+      # See `librechat.yaml` for why this is off. The argument is stronger here:
+      # a title generated for a delegated request is a second generation
+      # attributed to that person, in their name, that they did not ask for.
+      titleConvo: false
+
+      # **The whole of the enterprise profile.**
+      #
+      # `X-Diffuse-User-Id` is the stable identifier the deployment keys its
+      # audit trail on — the Mongo document id, measured arriving substituted in
+      # `evidence/smoke-verdict.md`. `X-Diffuse-User-Email` is shown to an
+      # operator and never keyed on, because an address changes when somebody
+      # marries or a domain migrates and a trail keyed on it loses its history.
+      #
+      # Do not bind these to a provider-specific field. v0.8.7 leaves an
+      # unresolved placeholder **as literal template text**, so a header bound
+      # to a field some users lack would arrive as `{{LIBRECHAT_USER_...}}` for
+      # all of them. The deployment refuses that rather than accepting it —
+      # accepting it would file every affected person under one identity and the
+      # trail would be consistent, readable and false.
+      headers:
+        X-Diffuse-User-Id: "{{LIBRECHAT_USER_ID}}"
+        X-Diffuse-User-Email: "{{LIBRECHAT_USER_EMAIL}}"

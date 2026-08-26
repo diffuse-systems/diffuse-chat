@@ -1,2 +1,6 @@
-# Nothing generated belongs in here. The stack is compose files and a receiver.
+# Nothing generated belongs in here. The stack is compose files and a script.
 *.log
+
+# Holds a credential to the customer's own deployment, and the secrets
+# `diffuse-chat up` generates. Never commit it.
+.env

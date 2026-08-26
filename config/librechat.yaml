@@ -1,0 +1,56 @@
+# The developer profile's endpoint.
+#
+# One credential for the whole stack and **no `headers` block**: nothing here
+# asserts an identity, because in this profile there is nobody to assert. Every
+# request reaches the deployment as `DIFFUSE_TOKEN`, and its audit trail says
+# exactly that.
+#
+# If you are reading this wondering where the per-user headers went: they are in
+# `librechat.enterprise.yaml`, and they only work with a credential issued
+# `--act-as`. Adding them here would produce a 403 on every request, with a
+# message telling you so.
+
+version: 1.2.8
+cache: false
+
+interface:
+  # v0.8.7 hides both of these by default and lands every conversation in the
+  # Agents pipeline. They are re-enabled so a person can see which endpoint
+  # they are talking to and pick a model — but they are **not** what makes the
+  # chat work: the composer still demands an agent, which is why
+  # `diffuse-chat up` provisions one. Measured, not assumed; see the README's
+  # "v0.8.7" section.
+  endpointsMenu: true
+  modelSelect: true
+  parameters: true
+  presets: true
+
+endpoints:
+  custom:
+    - name: "Diffuse"
+      apiKey: "${DIFFUSE_TOKEN}"
+      baseURL: "${DIFFUSE_BASE_URL}"
+      models:
+        # Two v0.8.7 facts in four lines.
+        #
+        # **The `default` list may not be empty**, even with `fetch: true` —
+        # the config schema requires at least one element. And **`${...}` is
+        # not substituted here**: it is substituted in `apiKey` and `baseURL`
+        # and arrives literally inside `models`, so a variable would show up in
+        # the picker as its own name. Measured, both of them.
+        #
+        # So this is a literal placeholder and nothing else. The real list is
+        # fetched from the deployment, which filters it by what the credential
+        # may call; this string is only ever shown when the endpoint cannot be
+        # reached, and then `./diffuse-chat doctor` says why.
+        default: ["unavailable"]
+        fetch: true
+      modelDisplayLabel: "Diffuse"
+
+      # **Off by default, and it is not cosmetic.** A conversation title is a
+      # second generation per conversation: it costs the customer's own machines
+      # compute they did not ask for, and it puts a model-written summary of the
+      # conversation into the façade's database — a second copy of content, in a
+      # store the deployment's own retention rules do not reach. Turn it on
+      # deliberately or not at all.
+      titleConvo: false
