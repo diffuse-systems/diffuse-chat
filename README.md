@@ -214,6 +214,9 @@ there, which is only ever displayed when the deployment cannot be reached.
   from two different accounts.
 - `evidence/delegation-demo.md` — the same stack in front of a real deployment
   built from the release packages: two people, two audit rows, one credential.
+- `evidence/refusal-in-the-ui.md` — what a refused person actually sees, read
+  off the stream, and the one configuration that changes it.
+- `tests/acceptance.sh` — the promise above, measured from a clean machine.
 - `compose.smoke.yaml`, `receiver/` — the capture stub those two were measured
   with. Kept because a version bump re-runs that measurement rather than
   assuming it still holds.
