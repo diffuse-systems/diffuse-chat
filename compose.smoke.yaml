@@ -1,0 +1,48 @@
+# The header smoke test, and nothing else.
+#
+# Design 021 D-G was written by reading LibreChat's source at a pinned digest.
+# Reading a resolver is not the same as watching a request, and the note says
+# so. This stack is how the reading gets checked: LibreChat talks to a receiver
+# that logs what actually arrived, with no coordinator involved.
+#
+# Everything is pinned by digest. A tag is a moving target and this whole design
+# rests on what one specific build substitutes.
+
+services:
+  mongo:
+    image: mongo@sha256:b6421fd6d1c5ded6377b397d8983e2f82e2100dc5123332dcfda2065a472be5b
+    restart: unless-stopped
+    volumes:
+      - mongo:/data/db
+
+  receiver:
+    build: ./receiver
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8099:8099"
+
+  librechat:
+    image: ghcr.io/danny-avila/librechat@sha256:c5db3331b845e1f289f8d04c0c77936c4bbe372f76730a804abc1c37e44d23a9
+    restart: unless-stopped
+    depends_on: [mongo, receiver]
+    ports:
+      - "127.0.0.1:3080:3080"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3080
+      MONGO_URI: mongodb://mongo:27017/LibreChat
+      # Long enough that the smoke test does not fight a session expiring.
+      JWT_SECRET: smoke-only-not-a-secret
+      JWT_REFRESH_SECRET: smoke-only-not-a-secret-either
+      CREDS_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      CREDS_IV: 0123456789abcdef0123456789abcdef
+      ALLOW_REGISTRATION: "true"
+      ALLOW_EMAIL_LOGIN: "true"
+      # No telemetry from a stack that exists to prove what leaves it.
+      NO_ANALYTICS: "true"
+      CONFIG_PATH: /app/librechat.yaml
+    volumes:
+      - ./config/librechat.smoke.yaml:/app/librechat.yaml:ro
+
+volumes:
+  mongo:

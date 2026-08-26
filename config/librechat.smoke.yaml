@@ -1,0 +1,26 @@
+version: 1.2.8
+cache: false
+
+# v0.8.7 hides the endpoint picker unless it is asked for, and lands every
+# conversation in the Agents pipeline. The enterprise profile will do the same
+# thing deliberately; the smoke test needs the picker to select "Diffuse".
+interface:
+  modelSelect: true
+  parameters: true
+
+endpoints:
+  custom:
+    - name: "Diffuse"
+      apiKey: "smoke-not-checked"
+      baseURL: "http://receiver:8099/v1"
+      models:
+        default: ["diffuse-smoke"]
+        fetch: false
+      titleConvo: false
+      modelDisplayLabel: "Diffuse"
+      # The whole point of this file. Design 021 D-G: a stable identifier that
+      # indexes, and a readable address that displays.
+      headers:
+        X-Diffuse-User-Id: "{{LIBRECHAT_USER_ID}}"
+        X-Diffuse-User-Email: "{{LIBRECHAT_USER_EMAIL}}"
+        X-Diffuse-User-Name: "{{LIBRECHAT_USER_NAME}}"
