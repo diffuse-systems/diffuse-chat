@@ -5,8 +5,12 @@ cache: false
 # conversation in the Agents pipeline. The enterprise profile will do the same
 # thing deliberately; the smoke test needs the picker to select "Diffuse".
 interface:
+  # Re-expose the direct chat on a custom endpoint. v0.8.7 hides both by
+  # default and lands every conversation in the Agents pipeline.
+  endpointsMenu: true
   modelSelect: true
   parameters: true
+  presets: true
 
 endpoints:
   custom:
@@ -15,7 +19,9 @@ endpoints:
       baseURL: "http://receiver:8099/v1"
       models:
         default: ["diffuse-smoke"]
-        fetch: false
+        # The stub answers GET /v1/models, so let LibreChat ask: a picker
+        # querying a mute endpoint hangs, which reads as a UI fault and is not.
+        fetch: true
       titleConvo: false
       modelDisplayLabel: "Diffuse"
       # The whole point of this file. Design 021 D-G: a stable identifier that
@@ -24,3 +30,7 @@ endpoints:
         X-Diffuse-User-Id: "{{LIBRECHAT_USER_ID}}"
         X-Diffuse-User-Email: "{{LIBRECHAT_USER_EMAIL}}"
         X-Diffuse-User-Name: "{{LIBRECHAT_USER_NAME}}"
+        # A field these local accounts do not have. What an unresolved
+        # placeholder becomes is the design-critical question: empty, absent,
+        # or the literal template that would pool every user under one string.
+        X-Diffuse-Unresolved: "{{LIBRECHAT_USER_OPENIDID}}"
