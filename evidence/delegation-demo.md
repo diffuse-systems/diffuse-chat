@@ -1,7 +1,7 @@
 # The 3c demonstration: LibreChat, unmodified, in front of a real deployment
 
 Design 021 phase 2, end to end. The smoke test proved what the façade *sends*.
-This proves what a real deployment *does with it* — and, more to the point, what
+This proves what a real deployment *does with it*, and, more to the point, what
 it refuses.
 
 Everything below is against **packaged binaries**: `.deb`s built by
@@ -16,7 +16,7 @@ with no plugin and no patch.
 ```
 
 The deployment ran as a container named `diffuse-api` on LibreChat's own compose
-network, with its certificate issued for that name — so the façade reached it by
+network, with its certificate issued for that name, so the façade reached it by
 DNS with a certificate that matched. No hostname override, no `NODE_TLS_REJECT_
 UNAUTHORIZED`: LibreChat was given the deployment's CA and nothing else.
 
@@ -46,7 +46,7 @@ point of the milestone: before it, both rows would have read `apikey/P8P5Q881`
 and no row would have named anybody.
 
 `diffuse-coordinator audit --via P8P5Q881` reads back everything that came
-through the façade — the question asked the day a gateway credential is
+through the façade: the question asked the day a gateway credential is
 suspected.
 
 ## The refusal, which is the part that matters
@@ -74,7 +74,7 @@ And what the trail recorded:
 ```
 
 **One row, not two.** The disabled person's request produced no row attributed to
-anybody — in particular not to the gateway credential's owner. That is the
+anybody: in particular not to the gateway credential's owner. That is the
 property design 021 exists for, and it is the one a fallback would have quietly
 destroyed: the trail would have been complete, readable, and wrong.
 

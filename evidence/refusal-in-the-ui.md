@@ -37,7 +37,7 @@ event: error
 data: {"error":"{ \"type\": \"illegal_model_request\", \"info\": \"Diffuse|diffuse-demo\" }"}
 ```
 
-**The deployment's sentence appears nowhere** — not in the stream, not in the
+**The deployment's sentence appears nowhere**, not in the stream, not in the
 conversation, and not in LibreChat's own server log. The refused message is not
 persisted at all: the conversation list is unchanged.
 
@@ -59,8 +59,8 @@ verbatim in LibreChat's container log:
   Re-enable them with `diffuse-coordinator identity enable 6a8f44f9bc4f9191e4179b87`.
 ```
 
-But the person then sees an **empty assistant reply** rather than an error — a
-silent failure instead of a misleading one — and the model catalogue stops being
+But the person then sees an **empty assistant reply** rather than an error, a
+silent failure instead of a misleading one, and the model catalogue stops being
 filtered per person, which is a feature the enterprise profile exists to
 provide.
 
@@ -79,7 +79,7 @@ attempted/6a8f44f9bc4f9191e4179b87 via apikey/QQ5WDKKE  identity.assert_refused 
 ```
 
 That row is what makes the trade acceptable, and it did not exist when lot 2
-asked this question — the refusal reached nobody at all. It was added in
+asked this question: the refusal reached nobody at all. It was added in
 `fix(delegation): every refused assertion reaches the trail, not just the first`.
 
 ## Not fixed, and deliberately

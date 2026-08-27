@@ -33,7 +33,7 @@ arrives here is the `_id`, which is what the enterprise profile will index on.
 to `Kowalczyk-Šimić`. For a DACH product this is a live path.
 
 **An unresolved placeholder arrives as the literal template.** A header bound to
-`{{LIBRECHAT_USER_OPENIDID}}` — a field these local accounts do not have —
+`{{LIBRECHAT_USER_OPENIDID}}`, a field these local accounts do not have,
 arrives as:
 
 ```
@@ -41,8 +41,8 @@ arrives as:
 ```
 
 That is the pooling hazard the design predicted from the stable release's
-source, confirmed in the version a customer would deploy. **Rule 1 of D-G — a
-value that is a literal placeholder is refused, never accepted as an identity —
+source, confirmed in the version a customer would deploy. **Rule 1 of D-G, a
+value that is a literal placeholder is refused, never accepted as an identity,
 is therefore measured rather than assumed.**
 
 ## A second signal, unasked for
@@ -62,7 +62,7 @@ Three facts about v0.8.7 that no document stated:
 2. **`interface.endpointsMenu` and `modelSelect` are off by default**, so the
    composer says "Please select an Agent" until an agent exists.
 3. **A non-browser user agent is refused** by `api/server/middleware/uaParser.js`
-   with `{"message":"Illegal request"}` — which is what a script driving the API
+   with `{"message":"Illegal request"}`, which is what a script driving the API
    sees, and looks nothing like a permission problem.
 
 The last one cost the most: it made agent creation and every chat attempt fail
