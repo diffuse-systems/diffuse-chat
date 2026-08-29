@@ -25,6 +25,40 @@ interface:
   parameters: true
   presets: true
 
+# Files: the interface must not offer what the product cannot do
+#
+# **This deployment is text to text.** A PDF dropped into the composer was
+# accepted, converted to text, and injected into the prompt: the machine spent
+# three minutes on it, the answer was about a wall of extracted characters, and
+# nothing anywhere said that was what had happened. An interface that accepts a
+# file it cannot use is worse than one that refuses it, because the user is left
+# to conclude the model is bad at reading documents rather than that it never
+# saw one.
+#
+# So the upload paths are closed. `endpoints.<name>.fileConfig.disabled` is what
+# v0.8.7 reads; the sizes and the empty type list are belt to that braces, so a
+# future version that ignores the flag still has nothing it will accept.
+#
+# This is a limitation of the product today, not of LibreChat, and it is written
+# in the documentation in those words. When the deployment is multimodal this
+# block is what changes.
+fileConfig:
+  endpoints:
+    Diffuse:
+      disabled: true
+      fileLimit: 0
+      fileSizeLimit: 0
+      totalSizeLimit: 0
+      supportedMimeTypes: []
+    default:
+      disabled: true
+      fileLimit: 0
+      fileSizeLimit: 0
+      totalSizeLimit: 0
+      supportedMimeTypes: []
+  serverFileSizeLimit: 0
+  avatarSizeLimit: 0
+
 endpoints:
   custom:
     - name: "Diffuse"

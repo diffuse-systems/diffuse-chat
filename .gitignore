@@ -4,3 +4,10 @@
 # Holds a credential to the customer's own deployment, and the secrets
 # `diffuse-chat up` generates. Never commit it.
 .env
+
+# The overlay `up` writes when the deployment is on this machine, and the one
+# an operator may write for themselves. Both belong to the machine they are on,
+# not to the repository: `compose.generated.yaml` is rewritten on every `up`,
+# and an override carries addresses that are true of one network.
+compose.generated.yaml
+compose.override.yaml

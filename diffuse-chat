@@ -76,8 +76,33 @@ fetch(url, { headers: { Authorization: `Bearer ${token}` } })
   });
 """
 
-DEV_FILES = ["-f", "compose.yaml"]
-ENTERPRISE_FILES = ["-f", "compose.yaml", "-f", "compose.enterprise.yaml"]
+# The overlay this tool writes for itself, and the one an operator may write.
+GENERATED = HERE / "compose.generated.yaml"
+OVERRIDE = HERE / "compose.override.yaml"
+
+
+def compose_files(enterprise):
+    """Every compose file that must take part, named explicitly.
+
+    **`-f` disables compose's automatic override.** Docker Compose merges
+    `compose.override.yaml` on its own only when no `-f` is given; the moment
+    one is, that stops and nothing says so. This tool has always passed `-f
+    compose.yaml`, so an operator who wrote an override watched it have no
+    effect at all, three times, with no message. The file was never part of the
+    configuration.
+
+    Both overlays are named here for that reason: the one this tool generates,
+    and the one a person may write. `up` says which are in play.
+    """
+    files = ["-f", "compose.yaml"]
+    if enterprise:
+        files += ["-f", "compose.enterprise.yaml"]
+    if GENERATED.is_file():
+        files += ["-f", GENERATED.name]
+    if OVERRIDE.is_file():
+        files += ["-f", OVERRIDE.name]
+    return files
+
 
 AGENT_ID = "agent_diffuse_default"
 AGENT_NAME = "Diffuse"
@@ -155,7 +180,7 @@ def ensure_secrets(values):
 
 
 REQUIRED = {
-    "DIFFUSE_BASE_URL": "where the deployment serves /v1, e.g. "
+    "DIFFUSE_BASE_URL": "the address a CONTAINER reaches your deployment at, e.g. "
                         "https://coordinator.internal:8443/v1",
     "DIFFUSE_CA_CERT": "an absolute path to the deployment's ca.crt on this machine",
     "DIFFUSE_TOKEN": "an API key: diffuse-coordinator apikey create --name chat",
@@ -178,6 +203,26 @@ def check_required(values, enterprise):
         print("\n  `cp .env.example .env` and fill them in.\n", file=sys.stderr)
         sys.exit(1)
 
+    # **The address is asked for, never derived.** Design 024 D-2b: this product
+    # has three separate defects with one cause, which is that it works out what
+    # it is called from its own hostname and never asks the person who knows. A
+    # machine's own name resolves through `/etc/hosts` here and nowhere inside a
+    # container, so deriving one produces an address that looks right on this
+    # screen and reaches nothing.
+    #
+    # What is refused here is only the shape. Whether the address *works* is not
+    # a question this machine can answer, and it is answered later from inside
+    # the container, where it means something.
+    base = values["DIFFUSE_BASE_URL"]
+    if not base.startswith("https://"):
+        die(f"DIFFUSE_BASE_URL is {base!r}.",
+            "It has to be an https:// address: this product has no plaintext",
+            "transport, so a http:// endpoint would not answer at all.")
+    if not base.rstrip("/").endswith("/v1"):
+        die(f"DIFFUSE_BASE_URL is {base!r}, which does not end in /v1.",
+            "LibreChat appends `/chat/completions` to it, so the /v1 has to be",
+            "there: https://<address>:8443/v1")
+
     ca = pathlib.Path(values["DIFFUSE_CA_CERT"])
     if not ca.is_file():
         die(
@@ -185,6 +230,139 @@ def check_required(values, enterprise):
             "It is the deployment's own CA — /etc/diffuse/ca.crt on the",
             "coordinator — and LibreChat needs it to trust the endpoint.",
         )
+
+
+# ---------------------------------------------------------------------------
+# Which of four things is wrong, and the command that repairs it
+# ---------------------------------------------------------------------------
+#
+# Design 024 D-3 and D-5. A check that reports a failure and stops is a check
+# that hands its work to the person least able to do it: they have one error
+# string and no idea which of four unrelated conditions produced it. The four
+# are a name that does not resolve, a port nothing listens on, a connection
+# nothing answers, and a certificate that does not cover the address. They have
+# four different repairs and three of them are one command.
+#
+# The same vocabulary as the coordinator's own diagnosis, deliberately: an
+# operator who has seen one of these should recognise the other.
+
+def probe_endpoint(files, base, token):
+    """Asks LibreChat's own node to reach the deployment. Returns one line.
+
+    **From inside the container, never from this machine.** The host may
+    resolve the name and trust the authority while the container does neither,
+    which is exactly the arrangement that fails, so a probe run here would pass
+    on it.
+    """
+    run = subprocess.run(
+        ["docker", "compose", *files, "exec", "-T", "librechat",
+         "node", "-e", TLS_PROBE, base.rstrip("/") + "/models", token],
+        cwd=HERE, capture_output=True, text=True,
+    )
+    lines = (run.stdout or run.stderr).strip().splitlines()
+    return lines[-1] if lines else "no answer from the probe"
+
+
+def endpoint_host_port(base):
+    """The host and port an endpoint names, with the https default filled in."""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(base)
+    return parsed.hostname or "", parsed.port or 443
+
+
+def names_this_machine(host):
+    """Whether `host` is a name for the machine this script is running on.
+
+    A name that resolves here to a loopback address is this machine and nowhere
+    else, which is the case that needs `extra_hosts`: the container resolving it
+    would find itself.
+    """
+    import socket
+
+    if host in ("localhost", "127.0.0.1", "::1"):
+        return True
+    try:
+        address = socket.gethostbyname(host)
+    except OSError:
+        return False
+    return address.startswith("127.") or host == socket.gethostname()
+
+
+def diagnose(verdict, base):
+    """(what is wrong, [the commands that repair it]) for a probe's answer.
+
+    Returns `(None, [])` when the endpoint answered, whatever it answered: a
+    403 from a gateway credential is a healthy answer and this is not the place
+    that decides.
+    """
+    host, port = endpoint_host_port(base)
+    upper = verdict.upper()
+
+    if verdict.startswith("OK ") or verdict[:3].isdigit():
+        return None, []
+
+    if "ENOTFOUND" in upper or "EAI_AGAIN" in upper:
+        return (
+            f"LibreChat cannot resolve {host!r}",
+            [f"Check what this machine resolves it to:    getent hosts {host}",
+             "If the deployment is on this machine, `./diffuse-chat up` writes the",
+             "mapping into compose.generated.yaml by itself. If it is elsewhere,",
+             f"put {host} in your DNS, or set DIFFUSE_BASE_URL to its address."],
+        )
+
+    if "ECONNREFUSED" in upper:
+        return (
+            f"nothing is listening on {host}:{port}, as the container sees it",
+            [f"On the machine that should be:             ss -ltnp | grep {port}",
+             "A service bound to 127.0.0.1 answers only its own machine, and a",
+             "container is not its own machine. For the API that is:",
+             f"  DIFFUSE_API_LISTEN_ADDR=0.0.0.0:{port} in /etc/diffuse/api.env",
+             "  sudo systemctl restart diffuse-api"],
+        )
+
+    if "ETIMEDOUT" in upper or "TIMEOUT" in upper or "UND_ERR_CONNECT" in upper:
+        return (
+            f"{host}:{port} accepted nothing and answered nothing, which is a firewall",
+            [f"With ufw:                                 sudo ufw allow {port}/tcp",
+             f"With firewalld:                           sudo firewall-cmd --add-port={port}/tcp --permanent",
+             "                                          sudo firewall-cmd --reload",
+             f"Then check from here:                     ./diffuse-chat doctor"],
+        )
+
+    if "ALTNAME" in upper:
+        # Node names the certificate's own list, which is the answer: the repair
+        # is to use one of them. There is no command that adds a name to a
+        # deployment's certificate after `init`, and saying "reissue it" would
+        # be advice nobody can follow.
+        return (
+            f"the deployment's certificate does not cover {host!r}",
+            ["Its certificate names the addresses below. Set DIFFUSE_BASE_URL to",
+             "one of them and run `./diffuse-chat up` again:",
+             f"  {verdict[:200]}",
+             "A deployment reached by an address its certificate does not carry",
+             "has to be given that address at `diffuse-coordinator init --host`,",
+             "which happens once, at installation."],
+        )
+
+    if "UNABLE_TO_VERIFY" in upper or "SELF_SIGNED" in upper or "DEPTH_ZERO" in upper:
+        return (
+            "LibreChat does not trust the deployment's certificate authority",
+            ["DIFFUSE_CA_CERT must be the deployment's own ca.crt:",
+             "  /etc/diffuse/ca.crt on the coordinator, copied to this machine",
+             "Then:                                     ./diffuse-chat up"],
+        )
+
+    return (f"the endpoint did not answer: {verdict[:120]}", [])
+
+
+def report_diagnosis(headline, repairs):
+    """Prints a diagnosis the way both `up` and `doctor` print it."""
+    print(f"\n  {headline}\n")
+    for line in repairs:
+        print(f"    {line}")
+    if repairs:
+        print()
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +574,93 @@ def human_accounts(service_email):
         return -1
 
 
+# ---------------------------------------------------------------------------
+# Making the address the container was given actually reach the deployment
+# ---------------------------------------------------------------------------
+
+def write_generated_overlay(mapping):
+    """Writes the overlay this tool owns, and says what it is for.
+
+    **`up` poses this, not the operator.** The defect `doctor` used to report
+    was one `up` had created: it accepted a `DIFFUSE_BASE_URL` naming this
+    machine's own hostname, which resolves here through `/etc/hosts` and
+    nowhere inside a container, and then reported the resulting failure as
+    though it had found something. An operator was left to write an
+    `extra_hosts` block by hand, against a compose file the tool was not even
+    reading.
+    """
+    body = [
+        "# Written by ./diffuse-chat. Do not edit: `up` rewrites it.",
+        "#",
+        "# The deployment is on this machine, and the address it is reached at is",
+        "# a name that resolves here and not inside a container. `host-gateway` is",
+        "# Docker's own name for the host as the container can reach it, which is",
+        "# portable in a way a hardcoded bridge address is not.",
+        "services:",
+        "  librechat:",
+        "    extra_hosts:",
+    ]
+    for name, target in mapping.items():
+        body.append(f'      - "{name}:{target}"')
+    GENERATED.write_text("\n".join(body) + "\n", encoding="utf-8")
+
+
+def ensure_endpoint_reachable(files, values, enterprise, port):
+    """Proves the container can reach the deployment, and repairs what it can.
+
+    Returns the compose file list to keep using, which changes when an overlay
+    has just been written.
+    """
+    base = values.get("DIFFUSE_BASE_URL", "")
+    token = values.get("DIFFUSE_GATEWAY_TOKEN" if enterprise else "DIFFUSE_TOKEN", "")
+    host, _ = endpoint_host_port(base)
+
+    verdict = probe_endpoint(files, base, token)
+    headline, repairs = diagnose(verdict, base)
+    if headline is None:
+        ok("the deployment answers from inside the container", base)
+        return files
+
+    resolvable = "ENOTFOUND" in verdict.upper() or "EAI_AGAIN" in verdict.upper()
+    if resolvable and names_this_machine(host):
+        say(f"{host!r} names this machine, which a container cannot resolve.")
+        say("writing compose.generated.yaml so the container reaches the host")
+        write_generated_overlay({host: "host-gateway"})
+
+        files = compose_files(enterprise)
+        compose(files, "up", "-d")
+        wait_for_librechat(port)
+
+        verdict = probe_endpoint(files, base, token)
+        headline, repairs = diagnose(verdict, base)
+        if headline is None:
+            ok("the deployment answers from inside the container", base)
+            return files
+
+    report_diagnosis(headline, repairs)
+    die("the container cannot reach the deployment, so `up` stopped here.",
+        "Nothing above is a guess: the probe ran inside LibreChat's own node.")
+    return files
+
+
+def configuration_took(files, values):
+    """Whether the running container has the configuration just written.
+
+    **The check exists because compose can silently not apply one.** A file
+    that is not in the `-f` list is not part of the configuration, so nothing
+    diverges and nothing is recreated: the change simply never happened. That
+    is what an operator met three times in a row with no message.
+    """
+    run = subprocess.run(
+        ["docker", "compose", *files, "exec", "-T", "librechat",
+         "sh", "-c", "echo $DIFFUSE_BASE_URL"],
+        cwd=HERE, capture_output=True, text=True,
+    )
+    live = run.stdout.strip()
+    wanted = values.get("DIFFUSE_BASE_URL", "").strip()
+    return (not live) or live == wanted, live
+
+
 def command_up(args):
     values = read_env()
     made = ensure_secrets(values)
@@ -419,9 +684,13 @@ def command_up(args):
     if made:
         say(f"generated {', '.join(made)} into .env — not committed, mode 0600")
 
-    files = ENTERPRISE_FILES if args.enterprise else DEV_FILES
+    files = compose_files(args.enterprise)
     profile = "enterprise" if args.enterprise else "developer"
     say(f"starting the {profile} profile")
+    overlays = [name for name in (GENERATED.name, OVERRIDE.name)
+                if (HERE / name).is_file()]
+    if overlays:
+        say(f"with {', '.join(overlays)}")
     compose(files, "up", "-d")
 
     port = int(values.get("DIFFUSE_CHAT_PORT", "3080"))
@@ -430,6 +699,23 @@ def command_up(args):
         die("LibreChat did not answer /api/config within three minutes.",
             "`./diffuse-chat doctor` says more; its own log is",
             "`docker compose logs librechat`.")
+
+    # **Design 024 D-4: what is running has to be what was just written.**
+    #
+    # `up -d` recreates a container whose configuration changed, which is the
+    # right behaviour and was never the problem: the problem was a file that
+    # was not part of the configuration at all, so nothing had changed as far
+    # as compose could tell. This asks the container itself, and recreates when
+    # its answer disagrees with the file on disk.
+    took, live = configuration_took(files, values)
+    if not took:
+        say("the running container has an older configuration, recreating it")
+        say(f"  it has {live!r}")
+        say(f"  .env says {values.get('DIFFUSE_BASE_URL', '')!r}")
+        compose(files, "up", "-d", "--force-recreate")
+        wait_for_librechat(port)
+
+    files = ensure_endpoint_reachable(files, values, args.enterprise, port)
 
     # --- the agent v0.8.7 will not chat without ---------------------------
     token, problem = ensure_service_account(port, service_email, service_password)
@@ -529,7 +815,7 @@ def command_doctor(args):
 
     enterprise = args.enterprise or bool(values.get("DIFFUSE_GATEWAY_TOKEN")) and \
         _running_config_is_enterprise()
-    files = ENTERPRISE_FILES if enterprise else DEV_FILES
+    files = compose_files(enterprise)
     port = int(values.get("DIFFUSE_CHAT_PORT", "3080"))
     failures = 0
 
@@ -596,15 +882,21 @@ def command_doctor(args):
     # the arrangement that fails.
     base = values.get("DIFFUSE_BASE_URL", "")
     token = values.get("DIFFUSE_GATEWAY_TOKEN" if enterprise else "DIFFUSE_TOKEN", "")
-    probe = subprocess.run(
-        ["docker", "compose", *files, "exec", "-T", "librechat",
-         "node", "-e", TLS_PROBE, base.rstrip("/") + "/models", token],
-        cwd=HERE, capture_output=True, text=True,
-    )
-    verdict = (probe.stdout or probe.stderr).strip().splitlines()
-    verdict = verdict[-1] if verdict else "no answer from the probe"
+    verdict = probe_endpoint(files, base, token)
 
-    if verdict.startswith("TLS "):
+    # **Design 024 D-5: every failure here names the command that repairs it.**
+    #
+    # A check that reports a failed connection and stops has handed its work to
+    # the person least equipped to do it. The four conditions below look
+    # identical from a browser and have four different repairs, three of which
+    # are one command each. `diagnose` is the same function `up` uses, so an
+    # operator who has seen one of these recognises the other.
+    headline, repairs = diagnose(verdict, base)
+    if headline is not None and not verdict[:3].isdigit():
+        bad("the deployment answers from inside the container", headline)
+        report_diagnosis(headline, repairs)
+        failures += 1
+    elif verdict.startswith("TLS "):
         bad("TLS chain validates with the mounted CA", verdict[4:][:90])
         failures += 1
     elif not enterprise:
@@ -695,7 +987,7 @@ def _running_config_is_enterprise():
 # ---------------------------------------------------------------------------
 
 def command_down(args):
-    files = ENTERPRISE_FILES if (HERE / "compose.enterprise.yaml").is_file() else DEV_FILES
+    files = compose_files((HERE / "compose.enterprise.yaml").is_file())
     extra = ["--volumes"] if args.volumes else []
     if args.volumes:
         say("removing the volumes: conversations, uploads and accounts go with them")
