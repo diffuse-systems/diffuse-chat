@@ -15,7 +15,8 @@ Four promises, each a test:
 
 The commands are read the way the coordinator's reference reads its own: from
 the `bash` blocks, a comment dropped, `\\` continuing a line, `&&`, `||`, `;`
-and `|` separating commands. Nothing is run: each is given to the parser.
+and `|` separating commands, and `sudo` or `NAME=value` in front of one not
+its program. Nothing is run: each is given to the parser.
 """
 
 import argparse
@@ -182,6 +183,11 @@ def invocations(page, program=PROGRAM):
                 if is_redirection(word):
                     break
                 words.append(word)
+            if words and words[0] == "sudo":
+                words = words[1:]
+                while words and words[0].startswith("-"):
+                    takes_value = words[0] in ("-u", "-g", "-C", "-h", "-p")
+                    words = words[2:] if takes_value else words[1:]
             while words and is_assignment(words[0]):
                 words = words[1:]
             if words and (words[0] == program or words[0].rsplit("/", 1)[-1] == program):
@@ -304,6 +310,7 @@ class Reading(unittest.TestCase):
             "cd diffuse-chat && ./diffuse-chat up \\\n"
             "    --enterprise  # the gateway profile\n"
             "FOO=1 ./diffuse-chat doctor > report.txt\n"
+            "sudo -u chat ./diffuse-chat down --volumes\n"
             "```\n"
             "```text\n"
             "./diffuse-chat not-a-command\n"
@@ -311,7 +318,11 @@ class Reading(unittest.TestCase):
         )
         self.assertEqual(
             [(case, line, args) for case, line, _text, args in invocations(page)],
-            [("A case", 3, ["up", "--enterprise"]), ("A case", 5, ["doctor"])],
+            [
+                ("A case", 3, ["up", "--enterprise"]),
+                ("A case", 5, ["doctor"]),
+                ("A case", 6, ["down", "--volumes"]),
+            ],
         )
 
     def test_a_link_belongs_to_the_case_above_it(self):
