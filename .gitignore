@@ -11,3 +11,7 @@
 # and an override carries addresses that are true of one network.
 compose.generated.yaml
 compose.override.yaml
+
+# The bytecode Python writes beside the script, the reference generator and the
+# tests they run.
+__pycache__/

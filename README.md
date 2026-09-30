@@ -55,7 +55,7 @@ Two different programs are involved, and it matters which machine each runs on:
 | command | what it is | where it runs |
 |---|---|---|
 | `diffuse-coordinator` | the coordinator binary, already installed from `diffuse-coordinator_amd64.deb` | on the **coordinator host** |
-| `./diffuse-chat` | a shell script **in this repository**, at its root | on the **machine that runs the chat interface** |
+| `./diffuse-chat` | a script **in this repository**, at its root | on the **machine that runs the chat interface** |
 
 They may be the same machine. Nothing here requires otherwise.
 
@@ -155,6 +155,10 @@ digests this repository pins, LibreChat answers, the deployment's CA is mounted
 where node will look for it, the TLS chain validates **from inside the
 container**, the endpoint answers this credential the way this profile expects,
 and the default agent exists *and is shared*.
+
+Every command and every option is in [`docs/reference/`](docs/reference/index.md),
+generated from the script: `python3 -m unittest discover -s tests` fails when a
+page stops matching it, or when a use case shows a command it would refuse.
 
 ## Branding
 
