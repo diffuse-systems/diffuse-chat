@@ -6,10 +6,10 @@
     ./diffuse-chat doctor             is this actually working, and if not, why
     ./diffuse-chat down               stop it; --volumes to forget it entirely
 
-Four verbs, and `up` is the only one that changes anything. In particular it
-provisions the default agent, because v0.8.7 cannot start a conversation
-without one and a shipped profile that told each user to build their own would
-not be a product.
+Three verbs: `up` starts it and puts it right, `doctor` changes nothing, and
+`down` stops it. In particular `up` provisions the default agent, because
+v0.8.7 cannot start a conversation without one and a shipped profile that told
+each user to build their own would not be a product.
 
 Python rather than shell for one reason that recurs below: every call this makes
 to LibreChat's own API has to present a **browser user agent**, and has to read
@@ -997,7 +997,13 @@ def command_down(args):
 
 # ---------------------------------------------------------------------------
 
-def main():
+def build_parser():
+    """The command line, built for `main` and for the reference.
+
+    Apart from `main` so that `scripts/cli_reference.py` and the tests read the
+    parser a person runs, without starting anything: the reference is generated
+    from it, and every command a page shows is parsed by it.
+    """
     parser = argparse.ArgumentParser(
         prog="diffuse-chat", description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1010,13 +1016,22 @@ def main():
     up.set_defaults(run=command_up)
 
     doctor = sub.add_parser("doctor", help="check what is actually working")
-    doctor.add_argument("--enterprise", action="store_true")
+    doctor.add_argument("--enterprise", action="store_true",
+                        help="check the gateway profile; without it, the profile "
+                             "is read from what is running")
     doctor.set_defaults(run=command_doctor)
 
     down = sub.add_parser("down", help="stop the stack")
     down.add_argument("--volumes", action="store_true",
-                      help="and forget everything it stored")
+                      help="also delete the volumes: the conversations, the "
+                           "uploads and the accounts go with them")
     down.set_defaults(run=command_down)
+
+    return parser
+
+
+def main():
+    parser = build_parser()
 
     if shutil.which("docker") is None:
         die("docker is not on the PATH.")
