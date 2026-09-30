@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""diffuse-chat — a chat façade in front of a Diffuse Enterprise deployment.
+"""diffuse-chat: a chat façade in front of a Diffuse Enterprise deployment.
 
     ./diffuse-chat up                 the developer profile: one credential
     ./diffuse-chat up --enterprise    the gateway profile: acts for each person
@@ -227,8 +227,8 @@ def check_required(values, enterprise):
     if not ca.is_file():
         die(
             f"DIFFUSE_CA_CERT points at {ca}, which is not a file.",
-            "It is the deployment's own CA — /etc/diffuse/ca.crt on the",
-            "coordinator — and LibreChat needs it to trust the endpoint.",
+            "It is the deployment's own CA (/etc/diffuse/ca.crt on the",
+            "coordinator), and LibreChat needs it to trust the endpoint.",
         )
 
 
@@ -682,7 +682,7 @@ def command_up(args):
     write_env(values)
 
     if made:
-        say(f"generated {', '.join(made)} into .env — not committed, mode 0600")
+        say(f"generated {', '.join(made)} into .env, not committed, mode 0600")
 
     files = compose_files(args.enterprise)
     profile = "enterprise" if args.enterprise else "developer"
@@ -736,7 +736,7 @@ def command_up(args):
 
     if token is None:
         die(f"could not provision the default agent: {problem}",
-            "Without it v0.8.7 cannot start a conversation at all — see the",
+            "Without it v0.8.7 cannot start a conversation at all: see the",
             "README's \"v0.8.7\" section.")
 
     found = existing_agent(port, token)
@@ -766,7 +766,7 @@ def command_up(args):
             say("in this profile that person must exist in the deployment too:")
             say("  diffuse-coordinator identity import users.csv")
     else:
-        say(f"open http://127.0.0.1:{port} — registration is closed"
+        say(f"open http://127.0.0.1:{port}, where registration is closed"
             f" ({people} account{'s' if people != 1 else ''}).")
 
     print()
@@ -932,7 +932,7 @@ def command_doctor(args):
                "403, which is the correct answer to `doctor`")
         elif verdict.startswith("403") and "may not act for a user" in verdict:
             bad("DIFFUSE_GATEWAY_TOKEN is a gateway credential",
-                "it is an ordinary key — reissue it with --act-as")
+                "it is an ordinary key: reissue it with --act-as")
             failures += 1
         else:
             bad("the endpoint answers this credential", verdict[:110])
