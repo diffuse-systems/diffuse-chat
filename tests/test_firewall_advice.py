@@ -5,6 +5,7 @@ import importlib.util
 import pathlib
 import re
 import unittest
+import unittest.mock
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "diffuse-chat"
 
@@ -69,15 +70,15 @@ class FirewallAdvice(unittest.TestCase):
         def fake(command, **_):
             return Ran(answers["status"])
 
-        module.subprocess.run = fake
-        answers["status"] = '{"on": true, "from": "local,10.20.0.0/16"}'
-        self.assertEqual(module.firewall_opening("172.18.0.0/16"),
-                         ["diffuse-coordinator", "firewall", "open", "--from",
-                          "local,10.20.0.0/16,172.18.0.0/16"])
-        answers["status"] = '{"on": true, "from": "local,172.18.0.0/16"}'
-        self.assertIsNone(module.firewall_opening("172.18.0.0/16"))
-        answers["status"] = '{"on": false, "from": null}'
-        self.assertIsNone(module.firewall_opening("172.18.0.0/16"))
+        with unittest.mock.patch.object(module.subprocess, "run", fake):
+            answers["status"] = '{"on": true, "from": "local,10.20.0.0/16"}'
+            self.assertEqual(module.firewall_opening("172.18.0.0/16"),
+                             ["diffuse-coordinator", "firewall", "open", "--from",
+                              "local,10.20.0.0/16,172.18.0.0/16"])
+            answers["status"] = '{"on": true, "from": "local,172.18.0.0/16"}'
+            self.assertIsNone(module.firewall_opening("172.18.0.0/16"))
+            answers["status"] = '{"on": false, "from": null}'
+            self.assertIsNone(module.firewall_opening("172.18.0.0/16"))
 
 
 if __name__ == "__main__":

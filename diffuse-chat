@@ -795,6 +795,13 @@ def command_up(args):
         compose(files, "up", "-d")
         wait_for_librechat(port)
 
+    if token is not None and args.enterprise and values.get("ALLOW_REGISTRATION") != "false":
+        values["ALLOW_REGISTRATION"] = "false"
+        write_env(values)
+        compose(files, "up", "-d")
+        wait_for_librechat(port)
+        say("registration closed: accounts in this profile come from `users add`")
+
     if token is None:
         die(f"could not provision the default agent: {problem}",
             "Without it v0.8.7 cannot start a conversation at all: see the",
@@ -1095,7 +1102,15 @@ def main():
     parser = build_parser()
 
     if shutil.which("docker") is None:
-        die("docker is not on the PATH.")
+        die("docker is not on the PATH.",
+            "Install Docker Engine and its compose plugin, then run this again:",
+            "  https://docs.docker.com/engine/install/",
+            "On Debian or Ubuntu, after adding Docker's repository as that page says:",
+            "  sudo apt install docker-ce docker-compose-plugin")
+    if subprocess.run(["docker", "compose", "version"], capture_output=True).returncode != 0:
+        die("docker is installed, its compose plugin is not.",
+            "  https://docs.docker.com/compose/install/linux/",
+            "On Debian or Ubuntu: sudo apt install docker-compose-plugin")
 
     args = parser.parse_args()
     sys.exit(args.run(args))

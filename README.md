@@ -59,12 +59,23 @@ Two different programs are involved, and it matters which machine each runs on:
 
 They may be the same machine. Nothing here requires otherwise.
 
-The chat host needs **Docker with the compose plugin**, and network access to
-your coordinator's `/v1` port.
+The chat host needs network access to your coordinator's `/v1` port, `git`,
+and **Docker Engine with its compose plugin**.
 
 ## Install
 
-### 1. Get this repository
+### 1. Docker
+
+Install Docker Engine and the compose plugin as
+[Docker's own page](https://docs.docker.com/engine/install/) says for your
+distribution. On Debian or Ubuntu, once Docker's repository is added:
+
+```bash
+sudo apt install docker-ce docker-compose-plugin
+docker compose version
+```
+
+### 2. Get this repository
 
 `./diffuse-chat` is not installed by any package and there is no copy of it on
 the coordinator. It is the script at the root of this repository:
@@ -76,7 +87,7 @@ cd diffuse-chat
 
 Every `./diffuse-chat` command below runs from inside that directory.
 
-### 2. Configure
+### 3. Configure
 
 ```bash
 cp .env.example .env
@@ -88,13 +99,13 @@ Fill in three values:
 |---|---|
 | the `/v1` endpoint | your coordinator's host and API port, e.g. `https://coordinator.internal:8443/v1` |
 | the path to `ca.crt` | copy `/etc/diffuse/ca.crt` from the coordinator to this machine |
-| a credential | created on the coordinator, in step 3 |
+| a credential | created on the coordinator, in step 4 |
 
 `./diffuse-chat up` writes the rest of `.env` itself, LibreChat's four secrets
 and the service account it uses to own the shared agent, into the same file,
 mode 0600. **`.env` is not committed and must not be.**
 
-### 3a. The developer profile
+### 4a. The developer profile
 
 One ordinary API key, created **on the coordinator**, not here:
 
@@ -113,7 +124,7 @@ Put the key it prints into `.env`, then, **in this repository**:
 Open `http://127.0.0.1:3080`, create your account, and chat. Registration closes
 by itself: the next `up` sees a person and shuts the door behind you.
 
-### 3b. The enterprise profile
+### 4b. The enterprise profile
 
 Two commands **on the coordinator**. The first issues the gateway credential,
 the only kind allowed to say which person a request is for; the second tells the
