@@ -181,7 +181,7 @@ def ensure_secrets(values):
 
 REQUIRED = {
     "DIFFUSE_BASE_URL": "the address a CONTAINER reaches your deployment at, e.g. "
-                        "https://coordinator.internal:8443/v1",
+                        "https://10.0.1.1:8443/v1",
     "DIFFUSE_CA_CERT": "an absolute path to the deployment's ca.crt on this machine",
     "DIFFUSE_TOKEN": "an API key: diffuse-coordinator apikey create --name chat",
 }
@@ -306,6 +306,81 @@ def compose_subnet(files):
 
 def coordinator_here():
     return pathlib.Path("/etc/diffuse/coordinator.toml").is_file()
+
+
+EXAMPLE_BASE_URL = "https://coordinator.internal:8443/v1"
+
+
+def certificate_names(path="/etc/diffuse/coordinator.crt"):
+    """The addresses and names the deployment's API certificate covers."""
+    import ssl
+
+    try:
+        decoded = ssl._ssl._test_decode_cert(path)
+    except (OSError, ssl.SSLError):
+        return []
+    return [value for kind, value in decoded.get("subjectAltName", ())
+            if kind in ("IP Address", "DNS")]
+
+
+def private_addresses():
+    """This machine's private IPv4 addresses: what a container reaches it at."""
+    import ipaddress
+
+    run = subprocess.run(["ip", "-o", "-4", "addr", "show"], capture_output=True,
+                         text=True, check=False)
+    found = []
+    for line in run.stdout.splitlines():
+        fields = line.split()
+        if len(fields) > 3:
+            address = ipaddress.ip_address(fields[3].split("/")[0])
+            if address.is_private and not address.is_loopback and not address.is_link_local:
+                found.append(str(address))
+    return found
+
+
+def api_port(path="/etc/diffuse/api.env"):
+    try:
+        for line in pathlib.Path(path).read_text().splitlines():
+            if line.strip().startswith("DIFFUSE_API_LISTEN_ADDR="):
+                return int(line.split("=", 1)[1].strip().strip('"').rsplit(":", 1)[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return 8443
+
+
+def local_base_url():
+    """An address of the deployment on this machine that a container reaches
+    and its certificate covers, or None with the names the certificate has."""
+    names = certificate_names()
+    local = private_addresses()
+    for name in names:
+        if name in local:
+            return f"https://{name}:{api_port()}/v1", names
+    return None, names
+
+
+def choose_base_url(values):
+    """Fills DIFFUSE_BASE_URL when it is unset or still the example."""
+    base = values.get("DIFFUSE_BASE_URL", "")
+    if base and base != EXAMPLE_BASE_URL:
+        return
+    if not coordinator_here():
+        if base == EXAMPLE_BASE_URL:
+            die(f"DIFFUSE_BASE_URL is still the example from .env.example, {base}.",
+                "Set it in .env to your coordinator's address, e.g.",
+                "  DIFFUSE_BASE_URL=https://10.0.1.1:8443/v1")
+        return
+    chosen, names = local_base_url()
+    if chosen is None:
+        die("the coordinator is on this machine, and no address of it fits.",
+            "A container reaches this machine at a private address, and the",
+            "address has to be one the API certificate names. It names:",
+            "  " + (", ".join(names) or "nothing this script could read"),
+            "Set DIFFUSE_BASE_URL in .env to https://<one of those>:8443/v1,",
+            "or re-issue the certificate with a private address of this machine.")
+    values["DIFFUSE_BASE_URL"] = chosen
+    say(f"the coordinator is on this machine: using {chosen}, which its certificate names")
 
 
 def as_root(command):
@@ -726,6 +801,7 @@ def command_up(args):
     values = read_env()
     made = ensure_secrets(values)
     service_email, service_password = provisioning_account(values)
+    choose_base_url(values)
     check_required(values, args.enterprise)
 
     # **Registration closes itself.** Open while there is nobody, shut once
