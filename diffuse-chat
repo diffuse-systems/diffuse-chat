@@ -289,7 +289,66 @@ def names_this_machine(host):
     return address.startswith("127.") or host == socket.gethostname()
 
 
-def diagnose(verdict, base):
+def compose_subnet(files):
+    """The subnet of the Docker network LibreChat is on, or None."""
+    out = compose(files, "config", "--format", "json", capture=True, check=False)
+    try:
+        name = json.loads(out).get("name") or "diffuse-chat"
+    except json.JSONDecodeError:
+        name = "diffuse-chat"
+    run = subprocess.run(
+        ["docker", "network", "inspect", f"{name}_default", "-f",
+         "{{range .IPAM.Config}}{{.Subnet}} {{end}}"],
+        capture_output=True, text=True, check=False)
+    subnets = [s for s in run.stdout.split() if "." in s]
+    return subnets[0] if subnets else None
+
+
+def coordinator_here():
+    return pathlib.Path("/etc/diffuse/coordinator.toml").is_file()
+
+
+def as_root(command):
+    return command if os.geteuid() == 0 else ["sudo", "-n", *command]
+
+
+def firewall_opening(subnet):
+    """The `firewall open` that lets this subnet in beside what is already let in,
+    or None when no firewall is active or the subnet is already in."""
+    run = subprocess.run(
+        as_root(["diffuse-coordinator", "firewall", "status", "--output", "json"]),
+        capture_output=True, text=True, check=False)
+    try:
+        status = json.loads(run.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not status.get("on"):
+        return None
+    current = status.get("from") or "local"
+    if subnet in current.split(","):
+        return None
+    return ["diffuse-coordinator", "firewall", "open", "--from", f"{current},{subnet}"]
+
+
+def open_for_docker(files):
+    """When the deployment is on this machine behind an active firewall, lets
+    Docker's network in, and only it."""
+    if not coordinator_here():
+        return
+    subnet = compose_subnet(files)
+    if not subnet:
+        return
+    command = firewall_opening(subnet)
+    if command is None:
+        return
+    say(f"letting LibreChat's network {subnet} through this machine's firewall:")
+    say("  sudo " + " ".join(command))
+    run = subprocess.run(as_root(command), capture_output=True, text=True, check=False)
+    if run.returncode != 0:
+        say("that needs root: run the line above, then ./diffuse-chat up again")
+
+
+def diagnose(verdict, base, subnet=None):
     """(what is wrong, [the commands that repair it]) for a probe's answer.
 
     Returns `(None, [])` when the endpoint answered, whatever it answered: a
@@ -315,19 +374,20 @@ def diagnose(verdict, base):
         return (
             f"nothing is listening on {host}:{port}, as the container sees it",
             [f"On the machine that should be:             ss -ltnp | grep {port}",
-             "A service bound to 127.0.0.1 answers only its own machine, and a",
-             "container is not its own machine. For the API that is:",
-             f"  DIFFUSE_API_LISTEN_ADDR=0.0.0.0:{port} in /etc/diffuse/api.env",
+             "The API listens on its machine's private addresses and loopback.",
+             "Set DIFFUSE_BASE_URL to the coordinator's private address. If that",
+             "address appeared after the API started, restart it to listen there:",
              "  sudo systemctl restart diffuse-api"],
         )
 
     if "ETIMEDOUT" in upper or "TIMEOUT" in upper or "UND_ERR_CONNECT" in upper:
         return (
             f"{host}:{port} accepted nothing and answered nothing, which is a firewall",
-            [f"With ufw:                                 sudo ufw allow {port}/tcp",
-             f"With firewalld:                           sudo firewall-cmd --add-port={port}/tcp --permanent",
-             "                                          sudo firewall-cmd --reload",
-             f"Then check from here:                     ./diffuse-chat doctor"],
+            ["Let LibreChat's network in, and nothing else. On the coordinator:",
+             f"  sudo diffuse-coordinator firewall open --from local,{subnet or '<subnet>'}",
+             *([] if subnet else
+               ["with <subnet> from:  docker network inspect diffuse-chat_default"]),
+             "Then check from here:                     ./diffuse-chat doctor"],
         )
 
     if "ALTNAME" in upper:
@@ -615,8 +675,9 @@ def ensure_endpoint_reachable(files, values, enterprise, port):
     token = values.get("DIFFUSE_GATEWAY_TOKEN" if enterprise else "DIFFUSE_TOKEN", "")
     host, _ = endpoint_host_port(base)
 
+    open_for_docker(files)
     verdict = probe_endpoint(files, base, token)
-    headline, repairs = diagnose(verdict, base)
+    headline, repairs = diagnose(verdict, base, compose_subnet(files))
     if headline is None:
         ok("the deployment answers from inside the container", base)
         return files
@@ -632,7 +693,7 @@ def ensure_endpoint_reachable(files, values, enterprise, port):
         wait_for_librechat(port)
 
         verdict = probe_endpoint(files, base, token)
-        headline, repairs = diagnose(verdict, base)
+        headline, repairs = diagnose(verdict, base, compose_subnet(files))
         if headline is None:
             ok("the deployment answers from inside the container", base)
             return files
@@ -891,7 +952,7 @@ def command_doctor(args):
     # identical from a browser and have four different repairs, three of which
     # are one command each. `diagnose` is the same function `up` uses, so an
     # operator who has seen one of these recognises the other.
-    headline, repairs = diagnose(verdict, base)
+    headline, repairs = diagnose(verdict, base, compose_subnet(files))
     if headline is not None and not verdict[:3].isdigit():
         bad("the deployment answers from inside the container", headline)
         report_diagnosis(headline, repairs)
