@@ -476,9 +476,8 @@ def diagnose(verdict, base, subnet=None):
             ["Its certificate names the addresses below. Set DIFFUSE_BASE_URL to",
              "one of them and run `./diffuse-chat up` again:",
              f"  {verdict[:200]}",
-             "A deployment reached by an address its certificate does not carry",
-             "has to be given that address at `diffuse-coordinator init --host`,",
-             "which happens once, at installation."],
+             "Or add the address to the certificate, on the coordinator:",
+             f"  sudo diffuse-coordinator certificate renew --host {host}"],
         )
 
     if "UNABLE_TO_VERIFY" in upper or "SELF_SIGNED" in upper or "DEPTH_ZERO" in upper:
@@ -902,14 +901,14 @@ def command_up(args):
             say(f"created the {AGENT_NAME!r} agent and shared it with everyone")
 
     print()
-    if people <= 0:
+    if people <= 0 and args.enterprise:
+        say("registration is closed in this profile. Create the accounts, from a")
+        say("CSV of email,name,password (an empty password is generated):")
+        say("  ./diffuse-chat users import users.csv")
+    elif people <= 0:
         say(f"open http://127.0.0.1:{port} and create the first account.")
         say("registration closes by itself: the next `up` sees a person and")
         say("shuts the door behind you.")
-        if args.enterprise:
-            print()
-            say("in this profile that person must exist in the deployment too:")
-            say("  diffuse-coordinator identity import users.csv")
     else:
         say(f"open http://127.0.0.1:{port}, where registration is closed"
             f" ({people} account{'s' if people != 1 else ''}).")
@@ -1128,6 +1127,148 @@ def _running_config_is_enterprise():
 
 
 # ---------------------------------------------------------------------------
+# users
+# ---------------------------------------------------------------------------
+
+def read_people(path):
+    """Rows of `email,name,password`, header and comments skipped."""
+    import csv
+
+    people = []
+    with open(path, newline="", encoding="utf-8") as handle:
+        for number, row in enumerate(csv.reader(handle), 1):
+            if not row or row[0].strip().startswith("#") or row[0].strip() == "email":
+                continue
+            email = row[0].strip()
+            name = row[1].strip() if len(row) > 1 else ""
+            password = row[2].strip() if len(row) > 2 else ""
+            if "@" not in email or not name:
+                die(f"{path}, line {number}: wants email,name[,password], got {row!r}")
+            people.append((email, name, password))
+    return people
+
+
+def account_ids(emails):
+    """LibreChat's id for each email, read from its database."""
+    wanted = json.dumps(sorted(emails))
+    out = mongo_eval(
+        f"db.users.find({{email: {{$in: {wanted}}}}}, {{email: 1}})"
+        ".forEach(u => print(u._id + ',' + u.email))")
+    found = {}
+    for line in out.splitlines():
+        if "," in line:
+            identifier, email = line.split(",", 1)
+            found[email.strip()] = identifier.strip()
+    return found
+
+
+def identities_csv(found):
+    lines = ["subject,address,models,pool"]
+    for email, identifier in sorted(found.items()):
+        lines.append(f"{identifier},{email},,")
+    return "\n".join(lines) + "\n"
+
+
+def set_registration(files, values, port, open_it):
+    values["ALLOW_REGISTRATION"] = "true" if open_it else "false"
+    write_env(values)
+    compose(files, "up", "-d")
+    wait_for_librechat(port)
+
+
+def import_identities(path):
+    """Runs `identity import` when the coordinator is here, or says how to."""
+    command = ["diffuse-coordinator", "identity", "import", str(path)]
+    if coordinator_here():
+        run = subprocess.run(as_root(command), capture_output=True, text=True, check=False)
+        if run.returncode == 0:
+            say("sudo " + " ".join(command))
+            print(run.stdout.rstrip())
+            return True
+        say(f"`{' '.join(command)}` did not run here: {run.stderr.strip()[:200]}")
+    say(f"on the coordinator, with {path} copied there:")
+    say(f"  sudo diffuse-coordinator identity import {path.name}")
+    return False
+
+
+def create_accounts(people, files, values, port):
+    """Creates the chat accounts; returns the passwords it generated."""
+    generated = {}
+    set_registration(files, values, port, True)
+    try:
+        for email, name, password in people:
+            if not password:
+                password = secrets.token_urlsafe(18)
+                generated[email] = password
+            status, body = librechat("/api/auth/register", {
+                "name": name, "username": email.split("@")[0], "email": email,
+                "password": password, "confirm_password": password,
+            }, port=port)
+            if status not in (200, 201):
+                generated.pop(email, None)
+                say(f"{email}: not created, {status} {body[:120]}")
+    finally:
+        set_registration(files, values, port, False)
+        say("registration closed again")
+    return generated
+
+
+def command_users(args):
+    values = read_env()
+    port = int(values.get("DIFFUSE_CHAT_PORT", "3080"))
+    files = compose_files(_running_config_is_enterprise())
+    service = values.get("DIFFUSE_CHAT_SERVICE_EMAIL", "")
+
+    if args.action == "list":
+        out = mongo_eval("db.users.find({}, {email: 1, name: 1})"
+                         ".forEach(u => print(u._id + ',' + u.email + ',' + u.name))")
+        rows = [line.split(",", 2) for line in out.splitlines() if line.count(",") >= 2]
+        rows = [row for row in rows if row[1] != service]
+        if not rows:
+            say("no accounts yet: ./diffuse-chat users add <email> <name>")
+        for identifier, email, name in rows:
+            print(f"  {email:<36} {name:<28} {identifier}")
+        return 0
+
+    if args.action == "disable":
+        found = account_ids([args.email])
+        if args.email not in found:
+            die(f"no chat account has the address {args.email}.")
+        command = ["diffuse-coordinator", "identity", "disable", found[args.email]]
+        if coordinator_here() and subprocess.run(as_root(command)).returncode == 0:
+            say(f"{args.email} is disabled: every request for them is refused and audited")
+            return 0
+        say("on the coordinator:")
+        say("  sudo " + " ".join(command))
+        return 0
+
+    if args.action == "add":
+        people = [(args.email, args.name, "")]
+        source = HERE / "users.csv"
+    else:
+        source = pathlib.Path(args.file).resolve()
+        people = read_people(source)
+    if not people:
+        die("nobody to create.")
+
+    generated = create_accounts(people, files, values, port)
+    found = account_ids([email for email, _, _ in people])
+    missing = [email for email, _, _ in people if email not in found]
+    target = source.with_name("identities.csv")
+    target.write_text(identities_csv(found), encoding="utf-8")
+    say(f"{len(found)} account(s) in the chat; their ids are in {target}")
+    for email in missing:
+        say(f"{email}: no account was found after creating it")
+    import_identities(target)
+    if generated:
+        print()
+        say("generated passwords, shown once, give each to its person:")
+        for email, password in generated.items():
+            print(f"    {email:<36} {password}")
+    return 0 if not missing else 1
+
+
+# ---------------------------------------------------------------------------
 # down
 # ---------------------------------------------------------------------------
 
@@ -1165,6 +1306,19 @@ def build_parser():
                         help="check the gateway profile; without it, the profile "
                              "is read from what is running")
     doctor.set_defaults(run=command_doctor)
+
+    users = sub.add_parser("users", help="create and disable chat accounts")
+    actions = users.add_subparsers(dest="action", required=True)
+    add = actions.add_parser("add", help="create one account and enrol it")
+    add.add_argument("email")
+    add.add_argument("name")
+    imported = actions.add_parser("import", help="create the accounts a CSV lists: "
+                                                 "email,name,password")
+    imported.add_argument("file")
+    actions.add_parser("list", help="the chat accounts and their ids")
+    disable = actions.add_parser("disable", help="refuse every request for a person")
+    disable.add_argument("email")
+    users.set_defaults(run=command_users)
 
     down = sub.add_parser("down", help="stop the stack")
     down.add_argument("--volumes", action="store_true",

@@ -20,6 +20,14 @@ Check what is actually working.
 ./diffuse-chat doctor
 ```
 
+## [`users`](users.md)
+
+Create and disable chat accounts.
+
+```bash
+./diffuse-chat users import users.csv
+```
+
 ## [`down`](down.md)
 
 Stop the stack.

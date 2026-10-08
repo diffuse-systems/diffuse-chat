@@ -126,26 +126,30 @@ by itself: the next `up` sees a person and shuts the door behind you.
 
 ### 4b. The enterprise profile
 
-Two commands **on the coordinator**. The first issues the gateway credential,
-the only kind allowed to say which person a request is for; the second tells the
-deployment who those people are:
+One command **on the coordinator**: it issues the gateway credential, the only
+kind allowed to say which person a request is for.
 
 ```bash
 # on the coordinator host
 diffuse-coordinator apikey create --name chat --act-as
-diffuse-coordinator identity import users.csv
 ```
 
-Then, **in this repository**:
+Then, **in this repository**, start the stack and create the accounts from a
+CSV of `email,name,password`. An empty password is generated and shown once.
 
 ```bash
 ./diffuse-chat up --enterprise
+./diffuse-chat users import users.csv
 ./diffuse-chat doctor
 ```
 
-Registration is closed in this profile. Accounts are not created here; they are
-imported on the coordinator, and somebody signing in who is not in `users.csv`
-is refused by the endpoint with a message saying so.
+`users import` creates each chat account, reads its id and enrols the person on
+the coordinator (`identity import`): directly when the coordinator is this
+machine, otherwise it writes `identities.csv` and prints the command to run
+there. Registration stays closed. `users list` shows the accounts, and
+`users disable <email>` refuses every request for a person while keeping their
+history. Somebody signing in who is not enrolled is refused by the endpoint
+with a message saying so.
 
 The gateway credential is a master key for your organisation's traffic. Read
 [`THREAT_MODEL.md`](THREAT_MODEL.md) before you deploy it: one page, and the

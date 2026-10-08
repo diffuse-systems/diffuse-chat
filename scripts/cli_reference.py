@@ -46,8 +46,9 @@ NOTES = {
             "`http://127.0.0.1:3080`, and provisions the agent everybody chats "
             "with. Run it again after changing `.env`: it recreates what it "
             "configured. In the developer profile, registration closes by itself "
-            "once somebody has an account; in the gateway profile it is closed "
-            "from the start."
+            "once somebody has an account; in the gateway profile it is open only "
+            "while the service account is created, and accounts come from "
+            "`users import`."
         ),
         "examples": ["./diffuse-chat up", "./diffuse-chat up --enterprise"],
     },
@@ -61,6 +62,21 @@ NOTES = {
             "and is shared."
         ),
         "examples": ["./diffuse-chat doctor", "./diffuse-chat doctor --enterprise"],
+    },
+    "users": {
+        "remark": (
+            "Creates chat accounts from a CSV of `email,name,password`, an empty "
+            "password generated and shown once, reads each account's id, writes "
+            "`identities.csv` for the coordinator and runs `identity import` when "
+            "the coordinator is on this machine. `disable` refuses every request "
+            "for a person on the coordinator and keeps their history."
+        ),
+        "examples": [
+            "./diffuse-chat users import users.csv",
+            "./diffuse-chat users add marie@klinik.example 'Marie Weber'",
+            "./diffuse-chat users list",
+            "./diffuse-chat users disable jonas@klinik.example",
+        ],
     },
     "down": {
         "remark": (
