@@ -378,7 +378,8 @@ def choose_base_url(values):
             "address has to be one the API certificate names. It names:",
             "  " + (", ".join(names) or "nothing this script could read"),
             "Set DIFFUSE_BASE_URL in .env to https://<one of those>:8443/v1,",
-            "or re-issue the certificate with a private address of this machine.")
+            "or add one to the certificate:",
+            "  sudo diffuse-coordinator certificate renew --host <private address>")
     values["DIFFUSE_BASE_URL"] = chosen
     say(f"the coordinator is on this machine: using {chosen}, which its certificate names")
 
