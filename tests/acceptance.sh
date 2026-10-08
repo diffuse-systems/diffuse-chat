@@ -39,7 +39,10 @@ for profile in dev ent; do
 
   step "$label profile — a message, end to end"
   python3 tests/chat_once.py "$profile"
-  expect "it reached the deployment, shaped as promised" 0 "$?"
+  reached=$?
+  expect "it reached the deployment, shaped as promised" 0 "$reached"
+  said=$(./diffuse-chat doctor 2>&1 | plain | grep -c "ok .*the agent is shared")
+  expect "doctor calls the agent shared, as a person just used it" 1 "$said"
 done
 
 step "the trail, which is the whole point"

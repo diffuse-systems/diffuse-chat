@@ -620,13 +620,11 @@ def provision_agent(port, admin_token, model):
     # everything else in the agent API uses.** Passing the wrong one answers
     # `400 Invalid resource ID`, which reads like a bug in the id you sent
     # rather than like two identifiers for one object.
-    resource_id = agent.get("_id") or agent_id
+    return agent_id, share_agent(port, admin_token, agent.get("_id") or agent_id)
 
-    # Shared with everybody who can sign in, as a viewer. Without this the
-    # agent belongs to whoever `up` ran as, and every other person is refused
-    # it with "Insufficient permissions to access this agent" — including for
-    # an agent seeded directly into Mongo, which is why this goes through the
-    # API at all.
+
+def share_agent(port, admin_token, resource_id):
+    """Shares the agent with everybody who can sign in, as a viewer."""
     status, body = librechat(
         f"/api/permissions/agent/{resource_id}",
         {"updated": [], "removed": [], "public": True,
@@ -634,9 +632,29 @@ def provision_agent(port, admin_token, model):
         token=admin_token, method="PUT", port=port,
     )
     if status != 200:
-        return agent_id, f"shared? PUT /api/permissions -> {status} {body[:200]}"
+        return f"PUT /api/permissions -> {status} {body[:200]}"
+    return None
 
-    return agent_id, None
+
+SHARED = (
+    "a person who is not its owner can open it: it has a public viewer entry"
+)
+
+
+def agent_sharing():
+    """The one criterion `up` and `doctor` share: the agent's own `_id` and
+    the number of public entries on it, which is what lets a person who did
+    not create it open a conversation with it. (None, -1) when there is no
+    agent."""
+    out = mongo_eval(
+        f'const a = db.agents.findOne({{name: "{AGENT_NAME}"}}); '
+        'print(a ? a._id + "," + db.aclentries.countDocuments('
+        '{resourceId: a._id, principalType: "public"}) : "none,-1")')
+    try:
+        resource_id, count = out.splitlines()[-1].split(",")
+        return (None if resource_id == "none" else resource_id), int(count)
+    except (ValueError, IndexError):
+        return None, -1
 
 
 def existing_agent(port, token):
@@ -886,6 +904,10 @@ def command_up(args):
     found = existing_agent(port, token)
     if found:
         say(f"the {AGENT_NAME!r} agent is already there ({found})")
+        resource_id, public = agent_sharing()
+        if resource_id and public <= 0:
+            problem = share_agent(port, token, resource_id)
+            say(f"it was not shared; sharing it: {problem or 'done'}")
     else:
         served = endpoint_models(port, token)
         model = served[0] if served else values.get("DIFFUSE_MODEL", "diffuse")
@@ -895,10 +917,14 @@ def command_up(args):
         agent_id, problem = provision_agent(port, token, model)
         if agent_id is None:
             die(f"could not create the default agent: {problem}")
+        say(f"created the {AGENT_NAME!r} agent ({agent_id})")
         if problem:
-            say(f"created {agent_id}, but sharing it did not take: {problem}")
-        else:
-            say(f"created the {AGENT_NAME!r} agent and shared it with everyone")
+            say(f"sharing it failed: {problem}")
+    _, public = agent_sharing()
+    if public > 0:
+        ok("the agent is shared", SHARED)
+    else:
+        bad("the agent is shared", "nobody but its owner can open it; `doctor` says the same")
 
     print()
     if people <= 0 and args.enterprise:
@@ -1095,16 +1121,11 @@ def command_doctor(args):
             "v0.8.7 cannot start a conversation without one")
         failures += 1
 
-    acl = mongo_eval("db.aclentries.countDocuments({})")
-    try:
-        entries = int(acl.splitlines()[-1])
-    except (ValueError, IndexError):
-        entries = -1
-    if entries > 0:
-        ok("it is shared, not just present", f"{entries} ACL entries")
+    _, public = agent_sharing()
+    if public > 0:
+        ok("the agent is shared", SHARED)
     else:
-        bad("it is shared, not just present",
-            "a plain user is refused an agent with no ACL row")
+        bad("the agent is shared", "nobody but its owner can open it: ./diffuse-chat up shares it")
         failures += 1
 
     print()
