@@ -79,6 +79,13 @@ fetch(url, { headers: { Authorization: `Bearer ${token}` } })
 # The overlay this tool writes for itself, and the one an operator may write.
 GENERATED = HERE / "compose.generated.yaml"
 OVERRIDE = HERE / "compose.override.yaml"
+DOMAINS = HERE / "compose.domains.yaml"
+DOMAINS_CONFIG = HERE / "librechat.domains.yaml"
+EMAIL_KEYS = ("EMAIL_SERVICE", "EMAIL_HOST", "EMAIL_PORT", "EMAIL_ENCRYPTION",
+              "EMAIL_USERNAME", "EMAIL_PASSWORD", "EMAIL_FROM", "EMAIL_FROM_NAME",
+              "MAILGUN_API_KEY", "MAILGUN_DOMAIN", "MAILGUN_HOST", "DOMAIN_CLIENT",
+              "DOMAIN_SERVER")
+VERIFIED_HEADER = '        X-Diffuse-User-Email-Verified: "{{LIBRECHAT_USER_EMAILVERIFIED}}"'
 
 
 def compose_files(enterprise):
@@ -99,6 +106,8 @@ def compose_files(enterprise):
         files += ["-f", "compose.enterprise.yaml"]
     if GENERATED.is_file():
         files += ["-f", GENERATED.name]
+    if enterprise and DOMAINS.is_file():
+        files += ["-f", DOMAINS.name]
     if OVERRIDE.is_file():
         files += ["-f", OVERRIDE.name]
     return files
@@ -758,6 +767,57 @@ def write_generated_overlay(mapping):
     GENERATED.write_text("\n".join(body) + "\n", encoding="utf-8")
 
 
+def registration_domains(values):
+    return [d.strip().lstrip("@").lower()
+            for d in values.get("REGISTRATION_DOMAINS", "").split(",") if d.strip()]
+
+
+def email_configured(values):
+    mailgun = all(values.get(k) for k in ("MAILGUN_API_KEY", "MAILGUN_DOMAIN", "EMAIL_FROM"))
+    smtp = bool(values.get("EMAIL_SERVICE") or values.get("EMAIL_HOST")) and bool(values.get("EMAIL_FROM"))
+    return mailgun or smtp
+
+
+def domains_config(domains):
+    source = (HERE / "config" / "librechat.enterprise.yaml").read_text(encoding="utf-8")
+    anchor = '        X-Diffuse-User-Email: "{{LIBRECHAT_USER_EMAIL}}"\n'
+    if anchor not in source:
+        die("config/librechat.enterprise.yaml has no X-Diffuse-User-Email header line.")
+    body = source.replace(anchor, anchor + VERIFIED_HEADER + "\n", 1)
+    listed = "\n".join(f"    - {d}" for d in domains)
+    return f"{body.rstrip()}\n\nregistration:\n  allowedDomains:\n{listed}\n"
+
+
+def write_domains(values, enterprise):
+    domains = registration_domains(values)
+    if not domains:
+        DOMAINS.unlink(missing_ok=True)
+        DOMAINS_CONFIG.unlink(missing_ok=True)
+        return []
+    if not enterprise:
+        die("REGISTRATION_DOMAINS is set, and it applies to the enterprise profile only.",
+            "Run ./diffuse-chat up --enterprise, or remove it from .env.")
+    if not email_configured(values):
+        die(f"REGISTRATION_DOMAINS is {','.join(domains)}, and no email service is set.",
+            "An address counts as verified only once its owner opened the link LibreChat",
+            "mails; without an email service LibreChat marks every address verified.",
+            "Set EMAIL_SERVICE (or EMAIL_HOST) and EMAIL_FROM in .env, or remove",
+            "REGISTRATION_DOMAINS and create the accounts with `users import`.")
+    DOMAINS_CONFIG.write_text(domains_config(domains), encoding="utf-8")
+    lines = [
+        "# Written by ./diffuse-chat from REGISTRATION_DOMAINS. Do not edit.",
+        "services:",
+        "  librechat:",
+        "    environment:",
+        '      ALLOW_REGISTRATION: "true"',
+        '      ALLOW_UNVERIFIED_EMAIL_LOGIN: "false"',
+    ]
+    lines += [f"      {k}: ${{{k}:-}}" for k in EMAIL_KEYS]
+    lines += ["    volumes:", f"      - ./{DOMAINS_CONFIG.name}:/app/librechat.yaml:ro"]
+    DOMAINS.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return domains
+
+
 def ensure_endpoint_reachable(files, values, enterprise, port):
     """Proves the container can reach the deployment, and repairs what it can.
 
@@ -835,6 +895,7 @@ def command_up(args):
     people = human_accounts(service_email)
     values["ALLOW_REGISTRATION"] = "false" if people > 0 else "true"
     write_env(values)
+    domains = write_domains(values, args.enterprise)
 
     if made:
         say(f"generated {', '.join(made)} into .env, not committed, mode 0600")
@@ -894,7 +955,15 @@ def command_up(args):
         write_env(values)
         compose(files, "up", "-d")
         wait_for_librechat(port)
-        say("registration closed: accounts in this profile come from `users add`")
+        if not domains:
+            say("registration closed: accounts in this profile come from `users add`")
+
+    if domains:
+        say(f"registration open to verified addresses in {', '.join(domains)}")
+        say("the coordinator enrols them at their first request once its")
+        say("/etc/diffuse/coordinator.toml says so, then a restart:")
+        quoted = ", ".join(f'"{d}"' for d in domains)
+        say(f"  [identities]\n  auto_enrol_domains = [{quoted}]")
 
     if token is None:
         die(f"could not provision the default agent: {problem}",

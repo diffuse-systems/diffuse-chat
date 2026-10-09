@@ -151,6 +151,16 @@ there. Registration stays closed. `users list` shows the accounts, and
 history. Somebody signing in who is not enrolled is refused by the endpoint
 with a message saying so.
 
+To let people of your domain sign up themselves, set `REGISTRATION_DOMAINS` in
+`.env` (for example `klinik.example`) together with an email service
+(`EMAIL_SERVICE` or `EMAIL_HOST`, and `EMAIL_FROM`). `up --enterprise` then opens
+registration to those domains, requires the address to be confirmed by the
+link LibreChat mails, and tells the coordinator whether it was. Add the line
+`up` prints (`auto_enrol_domains`) to the coordinator's configuration: a person
+with a confirmed address is enrolled at their first request, anyone else is
+refused. Without an email service `up` refuses `REGISTRATION_DOMAINS`, because
+LibreChat then counts every address as confirmed.
+
 The gateway credential is a master key for your organisation's traffic. Read
 [`THREAT_MODEL.md`](THREAT_MODEL.md) before you deploy it: one page, and the
 first section is the one that matters.
